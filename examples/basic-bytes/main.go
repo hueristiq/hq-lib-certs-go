@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"time"
 
-	hqgotls "github.com/hueristiq/hq-go-tls"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
-	tempDir, err := os.MkdirTemp("", "hq-go-tls-ca-certs-*")
+	tempDir, err := os.MkdirTemp("", "hq-lib-tls-go-ca-certs-*")
 	if err != nil {
 		log.Fatal("Failed to create temp directory:", err)
 	}

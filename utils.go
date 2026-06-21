@@ -164,14 +164,8 @@ func mkdir(path string) (err error) {
 		return
 	}
 
-	if _, err = os.Stat(path); os.IsNotExist(err) {
-		if err = os.MkdirAll(path, 0o755); err != nil {
-			err = fmt.Errorf("failed to create directory '%s' with permissions 0755: %w", path, err)
-
-			return
-		}
-	} else if err != nil {
-		err = fmt.Errorf("failed to check existence of directory '%s': %w", path, err)
+	if err = os.MkdirAll(path, 0o755); err != nil {
+		err = fmt.Errorf("failed to create directory '%s' with permissions 0755: %w", path, err)
 
 		return
 	}
