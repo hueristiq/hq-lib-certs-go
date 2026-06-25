@@ -286,6 +286,133 @@ func (CA *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 	return
 }
 
+// SignCSR signs a certificate signing request (CSR) with the CA's private key
+// and returns the resulting X.509 certificate.
+//
+// The certificate template is derived from the CSR's public key, subject, and
+// subject alternative names, while validity period, extended key usage, and
+// subject overrides are applied through the provided options. When no EKU
+// options are supplied, the certificate defaults to client authentication
+// ([x509.ExtKeyUsageClientAuth]).
+//
+// Parameters:
+//   - csr (*x509.CertificateRequest): The parsed CSR to sign.
+//   - ofs (...TLSCertificatePrivateKeyOptionFunc): Optional overrides for
+//     certificate properties.
+//
+// Returns:
+//   - certificate (*x509.Certificate): The signed certificate.
+//   - err (error): An error if CSR validation or signing fails.
+func (CA *CertificateAuthority) SignCSR(csr *x509.CertificateRequest, ofs ...TLSCertificatePrivateKeyOptionFunc) (certificate *x509.Certificate, err error) {
+	if CA == nil {
+		err = errors.New("invalid input, CertificateAuthority is nil")
+
+		return
+	}
+
+	if csr == nil {
+		err = errors.New("invalid input, CSR is nil")
+
+		return
+	}
+
+	if err = csr.CheckSignature(); err != nil {
+		err = fmt.Errorf("failed to verify CSR signature: %w", err)
+
+		return
+	}
+
+	opts := &_TLSCertificatePrivateKeyOptions{
+		CommonName: csr.Subject.CommonName,
+		Organization: []string{
+			"Acme Co",
+		},
+		ValidFrom: time.Now(),
+		ValidFor:  365 * 24 * time.Hour,
+	}
+
+	for _, f := range ofs {
+		f(opts)
+	}
+
+	if opts.CommonName == "" {
+		err = errors.New("invalid input, CommonName is empty")
+
+		return
+	}
+
+	if opts.ValidFor <= 0 {
+		err = fmt.Errorf("invalid input, ValidFor duration must be positive, got %v", opts.ValidFor)
+
+		return
+	}
+
+	extKeyUsage := opts.ExtKeyUsage
+	if len(extKeyUsage) == 0 {
+		extKeyUsage = []x509.ExtKeyUsage{
+			x509.ExtKeyUsageClientAuth,
+		}
+	}
+
+	var serialNumber *big.Int
+
+	serialNumber, err = generateSerialNumber()
+	if err != nil {
+		err = fmt.Errorf("failed to generate serial number for certificate: %w", err)
+
+		return
+	}
+
+	var subjectKeyID []byte
+
+	subjectKeyID, err = generateSubjectKeyID(csr.PublicKey)
+	if err != nil {
+		err = fmt.Errorf("failed to generate subject key ID for CSR public key: %w", err)
+
+		return
+	}
+
+	template := &x509.Certificate{
+		BasicConstraintsValid: true,
+		DNSNames:              csr.DNSNames,
+		EmailAddresses:        csr.EmailAddresses,
+		ExtKeyUsage:           extKeyUsage,
+		IPAddresses:           csr.IPAddresses,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		NotBefore:             opts.ValidFrom.Add(-5 * time.Minute),
+		NotAfter:              opts.ValidFrom.Add(opts.ValidFor),
+		SerialNumber:          serialNumber,
+		Subject: pkix.Name{
+			CommonName:   opts.CommonName,
+			Organization: opts.Organization,
+			SerialNumber: csr.Subject.SerialNumber,
+			Country:      csr.Subject.Country,
+			Province:     csr.Subject.Province,
+			Locality:     csr.Subject.Locality,
+		},
+		SubjectKeyId: subjectKeyID,
+		URIs:         csr.URIs,
+	}
+
+	var certificateInBytes []byte
+
+	certificateInBytes, err = x509.CreateCertificate(rand.Reader, template, CA._CACertificate, csr.PublicKey, CA._CACertificatePrivateKey)
+	if err != nil {
+		err = fmt.Errorf("failed to sign CSR: %w", err)
+
+		return
+	}
+
+	certificate, err = x509.ParseCertificate(certificateInBytes)
+	if err != nil {
+		err = fmt.Errorf("failed to parse signed CSR certificate: %w", err)
+
+		return
+	}
+
+	return
+}
+
 // NewTLSConfig creates a TLS configuration for use in a TLS server.
 //
 // Returns:

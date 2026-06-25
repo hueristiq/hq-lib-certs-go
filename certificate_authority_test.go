@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -256,4 +257,89 @@ func TestTLSServerHandshake(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSignCSRSuccess(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestCA(t, KeyTypeECDSAP256)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName: "test-station",
+		},
+		DNSNames: []string{"test.example.com"},
+	}
+
+	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, template, key)
+	require.NoError(t, err)
+
+	csr, err := x509.ParseCertificateRequest(csrBytes)
+	require.NoError(t, err)
+
+	cert, err := ca.SignCSR(csr,
+		TLSCertificatePrivateKeyWithValidFor(1*time.Hour),
+		TLSCertificatePrivateKeyWithExtKeyUsage(x509.ExtKeyUsageClientAuth),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+
+	assert.Equal(t, "test-station", cert.Subject.CommonName)
+	assert.Contains(t, cert.DNSNames, "test.example.com")
+	assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+	assert.Equal(t, ca.GetCACertificate().Subject, cert.Issuer)
+
+	err = cert.CheckSignatureFrom(ca.GetCACertificate())
+	require.NoError(t, err)
+}
+
+func TestSignCSRUsesClientAuthDefault(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestCA(t, KeyTypeECDSAP256)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "default-eku"},
+	}, key)
+	require.NoError(t, err)
+
+	csr, err := x509.ParseCertificateRequest(csrBytes)
+	require.NoError(t, err)
+
+	cert, err := ca.SignCSR(csr, TLSCertificatePrivateKeyWithValidFor(1*time.Hour))
+	require.NoError(t, err)
+
+	assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+}
+
+func TestSignCSRInvalidSignature(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestCA(t, KeyTypeECDSAP256)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "tampered"},
+	}, key)
+	require.NoError(t, err)
+
+	csr, err := x509.ParseCertificateRequest(csrBytes)
+	require.NoError(t, err)
+
+	// Tamper with the public key so the signature no longer matches.
+	csr.PublicKey = &otherKey.PublicKey
+
+	_, err = ca.SignCSR(csr)
+	require.ErrorContains(t, err, "failed to verify CSR signature")
 }

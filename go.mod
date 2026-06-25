@@ -2,7 +2,7 @@ module github.com/hueristiq/hq-lib-tls-go
 
 go 1.26.3
 
-require golang.org/x/text v0.31.0
+require golang.org/x/text v0.38.0
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
