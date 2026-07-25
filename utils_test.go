@@ -1,4 +1,4 @@
-package tls
+package certs
 
 import (
 	"crypto/rsa"
@@ -37,6 +37,32 @@ func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 
 	assert.Equal(t, cert.Raw, loadedCert.Raw)
 	assert.IsType(t, &rsa.PrivateKey{}, loadedKey)
+}
+
+func TestSaveCertificatePrivateKeyToFilesSeparateDirectories(t *testing.T) {
+	t.Parallel()
+
+	cert, key, err := GenerateCACertificatePrivateKey()
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	// Distinct nested paths exercise directory creation for both files.
+	certPath := filepath.Join(dir, "certs", "cert.pem")
+	keyPath := filepath.Join(dir, "keys", "key.pem")
+
+	err = SaveCertificatePrivateKeyToFiles(cert, certPath, key, keyPath)
+	require.NoError(t, err)
+
+	_, err = os.Stat(certPath)
+	require.NoError(t, err)
+
+	keyInfo, err := os.Stat(keyPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), keyInfo.Mode().Perm())
+
+	loadedCert, _, err := LoadCertificatePrivateKeyFromFiles(certPath, keyPath)
+	require.NoError(t, err)
+	assert.Equal(t, cert.Raw, loadedCert.Raw)
 }
 
 func TestSaveCertificatePrivateKeyToFilesValidation(t *testing.T) {

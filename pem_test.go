@@ -1,4 +1,4 @@
-package tls
+package certs
 
 import (
 	"crypto"
@@ -168,7 +168,7 @@ func TestNewWithBytesCertificatePrivateKeyValidation(t *testing.T) {
 		t.Parallel()
 
 		_, err := NewWithBytesCertificatePrivateKey([]byte("not a pem"), keyBytes)
-		require.ErrorContains(t, err, "decode PEM block for CA certificate")
+		require.ErrorContains(t, err, "decoding PEM block for CA certificate")
 	})
 
 	t.Run("wrong cert block type", func(t *testing.T) {
@@ -184,14 +184,14 @@ func TestNewWithBytesCertificatePrivateKeyValidation(t *testing.T) {
 		garbage := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("garbage")})
 
 		_, err := NewWithBytesCertificatePrivateKey(garbage, keyBytes)
-		require.ErrorContains(t, err, "failed to parse X.509 certificate")
+		require.ErrorContains(t, err, "parsing X.509 certificate")
 	})
 
 	t.Run("malformed key pem", func(t *testing.T) {
 		t.Parallel()
 
 		_, err := NewWithBytesCertificatePrivateKey(certBytes, []byte("not a pem"))
-		require.ErrorContains(t, err, "decode PEM block for private key")
+		require.ErrorContains(t, err, "decoding PEM block for private key")
 	})
 
 	t.Run("unsupported key block type", func(t *testing.T) {

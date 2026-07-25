@@ -1,4 +1,4 @@
-module github.com/hueristiq/hq-lib-tls-go
+module github.com/hueristiq/hq-lib-certs-go
 
 go 1.26.3
 

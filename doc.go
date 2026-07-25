@@ -1,4 +1,4 @@
-// Package tls generates, manages, and signs X.509 certificates for building TLS
+// Package certs generates, manages, and signs X.509 certificates for building TLS
 // servers with dynamic, per-host certificate issuance.
 //
 // The package offers two complementary capabilities:
@@ -29,15 +29,15 @@
 // Generate a CA, wrap it in an authority, and serve TLS with SNI-driven
 // certificates:
 //
-//	caCert, caKey, err := tls.GenerateCACertificatePrivateKey(
-//		tls.CACertificatePrivateKeyWithCommonName("Example Root CA"),
-//		tls.CACertificatePrivateKeyWithKeyType(tls.KeyTypeECDSAP256),
+//	caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
+//		certs.CACertificatePrivateKeyWithCommonName("Example Root CA"),
+//		certs.CACertificatePrivateKeyWithKeyType(certs.KeyTypeECDSAP256),
 //	)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
 //
-//	authority, err := tls.New(caCert, caKey)
+//	authority, err := certs.New(caCert, caKey)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -55,8 +55,10 @@
 // # Standards and safety
 //
 // Certificates follow RFC 5280 — random 128-bit serial numbers and SHA-256
-// subject key identifiers — and are PEM-encoded per RFC 7468. TLS configs
-// produced by the authority require TLS 1.2 or higher and advertise the HTTP/2
-// and HTTP/1.1 ALPN protocols. A [CertificateAuthority] is safe for concurrent
+// subject key identifiers — and are PEM-encoded per RFC 7468. Leaf certificates
+// are clamped to the CA's expiry so they never outlive their issuer. TLS configs
+// produced by the authority require TLS 1.2 or higher and, by default, advertise
+// the HTTP/2 and HTTP/1.1 ALPN protocols (overridable with
+// [TLSConfigWithNextProtos]). A [CertificateAuthority] is safe for concurrent
 // use by multiple goroutines.
-package tls
+package certs

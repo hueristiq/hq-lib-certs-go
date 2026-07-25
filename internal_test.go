@@ -1,4 +1,4 @@
-package tls
+package certs
 
 import (
 	"crypto/rand"
@@ -67,6 +67,10 @@ func TestNormalizeHost(t *testing.T) {
 	}{
 		{"plain", "example.com", "example.com"},
 		{"with port", "example.com:443", "example.com"},
+		{"uppercase folds to lowercase", "EXAMPLE.com", "example.com"},
+		{"uppercase with port", "EXAMPLE.com:443", "example.com"},
+		{"trailing dot is stripped", "example.com.", "example.com"},
+		{"trailing dot with port", "example.com.:443", "example.com"},
 		{"nfd normalizes to nfc", nfd, nfc},
 		{"nfd with port", nfd + ":8443", nfc},
 	}
@@ -86,7 +90,7 @@ func TestClearOldCacheEntries(t *testing.T) {
 	now := time.Now()
 
 	ca := &CertificateAuthority{
-		cache: map[string]*_TLSCertificateCacheEntry{
+		cache: map[string]*tlsCertificateCacheEntry{
 			"old.example.com":    {certificate: &tls.Certificate{}, createdAt: now.Add(-2 * time.Hour)},
 			"newer.example.com":  {certificate: &tls.Certificate{}, createdAt: now.Add(-time.Hour)},
 			"newest.example.com": {certificate: &tls.Certificate{}, createdAt: now},

@@ -1,4 +1,4 @@
-package tls
+package certs
 
 import (
 	"crypto/ecdsa"
@@ -116,7 +116,7 @@ func TestGenerateTLSCertificateSuccess(t *testing.T) {
 	assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
 
 	// The leaf must be signed by the CA.
-	require.NoError(t, cert.CheckSignatureFrom(ca.GetCACertificate()))
+	require.NoError(t, cert.CheckSignatureFrom(ca.CACertificate()))
 }
 
 func TestGenerateTLSCertificateHostClassification(t *testing.T) {
