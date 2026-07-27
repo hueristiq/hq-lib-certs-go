@@ -4,11 +4,23 @@ import (
 	"crypto/rsa"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// expectedWritePerm returns the permission bits a file written by writeToFile is
+// expected to have. Windows only models the read-only attribute, so a writable
+// file stats as 0666 there instead of the 0600 requested at creation.
+func expectedWritePerm() os.FileMode {
+	if runtime.GOOS == "windows" {
+		return 0o666
+	}
+
+	return 0o600
+}
 
 func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -26,11 +38,11 @@ func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 
 	certInfo, err := os.Stat(certPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), certInfo.Mode().Perm())
+	assert.Equal(t, expectedWritePerm(), certInfo.Mode().Perm())
 
 	keyInfo, err := os.Stat(keyPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), keyInfo.Mode().Perm())
+	assert.Equal(t, expectedWritePerm(), keyInfo.Mode().Perm())
 
 	loadedCert, loadedKey, err := LoadCertificatePrivateKeyFromFiles(certPath, keyPath)
 	require.NoError(t, err)
@@ -58,7 +70,7 @@ func TestSaveCertificatePrivateKeyToFilesSeparateDirectories(t *testing.T) {
 
 	keyInfo, err := os.Stat(keyPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), keyInfo.Mode().Perm())
+	assert.Equal(t, expectedWritePerm(), keyInfo.Mode().Perm())
 
 	loadedCert, _, err := LoadCertificatePrivateKeyFromFiles(certPath, keyPath)
 	require.NoError(t, err)
@@ -136,7 +148,7 @@ func TestWriteToFile(t *testing.T) {
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
 }
 
 func TestWriteToFileValidation(t *testing.T) {
