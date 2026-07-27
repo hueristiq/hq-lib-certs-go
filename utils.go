@@ -1,4 +1,4 @@
-package tls
+package certs
 
 import (
 	"crypto"
@@ -26,181 +26,184 @@ import (
 //
 // Returns:
 //   - certificate (*x509.Certificate): A pointer to the loaded X.509 certificate.
-//   - certificatePrivateKey (crypto.Signer): The loaded private key, implementing the crypto.Signer interface.
-//   - err (error): An error with stack trace and metadata if loading, parsing, or type assertion fails; otherwise, nil.
-func LoadCertificatePrivateKeyFromFiles(certificateFilePath, certificatePrivateKeyFilePath string) (certificate *x509.Certificate, certificatePrivateKey crypto.Signer, err error) {
+//   - privateKey (crypto.Signer): The loaded private key, implementing the crypto.Signer interface.
+//   - err (error): An error if loading, parsing, or type assertion fails; otherwise, nil.
+func LoadCertificatePrivateKeyFromFiles(certificateFilePath, certificatePrivateKeyFilePath string) (certificate *x509.Certificate, privateKey crypto.Signer, err error) {
 	if certificateFilePath == "" || certificatePrivateKeyFilePath == "" {
 		err = errors.New("invalid input, certificate file path or private key file path is empty")
 
-		return
+		return nil, nil, err
 	}
 
-	tlsCA, err := tls.LoadX509KeyPair(certificateFilePath, certificatePrivateKeyFilePath)
+	keyPair, err := tls.LoadX509KeyPair(certificateFilePath, certificatePrivateKeyFilePath)
 	if err != nil {
-		err = fmt.Errorf("failed to load certificate and private key from files '%s' and '%s': %w", certificateFilePath, certificatePrivateKeyFilePath, err)
+		err = fmt.Errorf("loading certificate and private key from files %q and %q: %w", certificateFilePath, certificatePrivateKeyFilePath, err)
 
-		return
+		return nil, nil, err
 	}
 
-	certificate, err = x509.ParseCertificate(tlsCA.Certificate[0])
+	certificate, err = x509.ParseCertificate(keyPair.Certificate[0])
 	if err != nil {
-		err = fmt.Errorf("failed to parse X.509 certificate from file '%s': %w", certificateFilePath, err)
+		err = fmt.Errorf("parsing X.509 certificate from file %q: %w", certificateFilePath, err)
 
-		return
+		return nil, nil, err
 	}
 
-	var ok bool
-
-	certificatePrivateKey, ok = tlsCA.PrivateKey.(crypto.Signer)
+	signer, ok := keyPair.PrivateKey.(crypto.Signer)
 	if !ok {
-		err = fmt.Errorf("private key from file '%s' does not implement crypto.Signer: got type %T", certificatePrivateKeyFilePath, tlsCA.PrivateKey)
+		err = fmt.Errorf("private key from file %q does not implement crypto.Signer: got type %T", certificatePrivateKeyFilePath, keyPair.PrivateKey)
 
-		return
+		return nil, nil, err
 	}
 
-	switch certificatePrivateKey.(type) {
+	privateKey = signer
+
+	switch privateKey.(type) {
 	case *rsa.PrivateKey, *ecdsa.PrivateKey, ed25519.PrivateKey:
 	default:
-		err = fmt.Errorf("unsupported private key type in file '%s': got %T, expected RSA, ECDSA, or Ed25519", certificatePrivateKeyFilePath, certificatePrivateKey)
+		err = fmt.Errorf("unsupported private key type in file %q: got %T, expected RSA, ECDSA, or Ed25519", certificatePrivateKeyFilePath, privateKey)
 
-		return
+		return nil, nil, err
 	}
 
-	return
+	return certificate, privateKey, nil
 }
 
 // SaveCertificatePrivateKeyToFiles saves a certificate and its private key to the specified files in PEM format.
 //
 // The certificate and private key are converted to PEM format and written to the provided file paths.
-// The directory for the certificate file is created with permissions 0755 if it does not exist. Files are
+// The directories for both files are created with permissions 0755 if they do not exist. Files are
 // written with restrictive permissions (0600) to ensure security for sensitive data. The private key must
 // implement the crypto.Signer interface and be one of the supported types (RSA, ECDSA, or Ed25519).
-// The function ensures proper directory creation and provides detailed error messages for debugging.
 //
 // Parameters:
 //   - certificate (*x509.Certificate): A pointer to the X.509 certificate to save.
 //   - certificateFilePath (string): The file path where the certificate will be saved in PEM format.
-//   - certificatePrivateKey (crypto.Signer): The private key to save, implementing the crypto.Signer interface.
-//   - certificatePrivateKeyFilePath (string): The file path where the private key will be saved in PEM format.
+//   - privateKey (crypto.Signer): The private key to save, implementing the crypto.Signer interface.
+//   - privateKeyFilePath (string): The file path where the private key will be saved in PEM format.
 //
 // Returns:
-//   - err (error): An error with stack trace and metadata if directory creation, PEM conversion, or file writing
-//     fails; otherwise, nil.
-func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, certificateFilePath string, certificatePrivateKey crypto.Signer, certificatePrivateKeyFilePath string) (err error) {
+//   - err (error): An error if directory creation, PEM conversion, or file writing fails; otherwise, nil.
+func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, certificateFilePath string, privateKey crypto.Signer, privateKeyFilePath string) (err error) {
 	if certificate == nil {
 		err = errors.New("invalid input, certificate is nil")
 
-		return
+		return err
 	}
 
-	if certificatePrivateKey == nil {
+	if privateKey == nil {
 		err = errors.New("invalid input, private key is nil")
 
-		return
+		return err
 	}
 
-	if certificateFilePath == "" || certificatePrivateKeyFilePath == "" {
+	if certificateFilePath == "" || privateKeyFilePath == "" {
 		err = errors.New("invalid input, certificate file path or private key file path is empty")
 
-		return
+		return err
 	}
 
 	certificateFilePathDirectory := filepath.Dir(certificateFilePath)
 
 	if err = mkdir(certificateFilePathDirectory); err != nil {
-		err = fmt.Errorf("failed to create directory '%s' for certificate: %w", certificateFilePathDirectory, err)
+		err = fmt.Errorf("creating directory %q for certificate: %w", certificateFilePathDirectory, err)
 
-		return
+		return err
 	}
 
-	var certificateBytes []byte
+	privateKeyFilePathDirectory := filepath.Dir(privateKeyFilePath)
 
-	certificateBytes, err = CertificateToPEM(certificate)
+	if err = mkdir(privateKeyFilePathDirectory); err != nil {
+		err = fmt.Errorf("creating directory %q for private key: %w", privateKeyFilePathDirectory, err)
+
+		return err
+	}
+
+	certificateBytes, err := CertificateToPEM(certificate)
 	if err != nil {
-		err = fmt.Errorf("failed to convert certificate to PEM format: %w", err)
+		err = fmt.Errorf("converting certificate to PEM format: %w", err)
 
-		return
+		return err
 	}
 
 	if err = writeToFile(certificateBytes, certificateFilePath); err != nil {
-		err = fmt.Errorf("failed to write certificate to file '%s': %w", certificateFilePath, err)
+		err = fmt.Errorf("writing certificate to file %q: %w", certificateFilePath, err)
 
-		return
+		return err
 	}
 
-	var keyBytes []byte
-
-	keyBytes, err = PrivateKeyToPEM(certificatePrivateKey)
+	keyBytes, err := PrivateKeyToPEM(privateKey)
 	if err != nil {
-		err = fmt.Errorf("failed to convert private key to PEM format (type %T): %w", certificatePrivateKey, err)
+		err = fmt.Errorf("converting private key to PEM format (type %T): %w", privateKey, err)
 
-		return
+		return err
 	}
 
-	if err = writeToFile(keyBytes, certificatePrivateKeyFilePath); err != nil {
-		err = fmt.Errorf("failed to write private key to file '%s': %w", certificatePrivateKeyFilePath, err)
+	if err = writeToFile(keyBytes, privateKeyFilePath); err != nil {
+		err = fmt.Errorf("writing private key to file %q: %w", privateKeyFilePath, err)
 
-		return
+		return err
 	}
 
-	return
+	return nil
 }
 
 // mkdir creates a directory at the specified path if it does not exist.
 //
 // The directory is created with permissions 0755 (rwxr-xr-x), suitable for directories containing
-// certificate files. If the directory already exists, no action is taken. The function provides
-// detailed error messages for debugging purposes.
+// certificate files. If the directory already exists, no action is taken.
 //
 // Parameters:
 //   - path (string): The file system path for the directory to create.
 //
 // Returns:
-//   - err (error): An error with stack trace and metadata if directory creation fails; otherwise, nil.
+//   - err (error): An error if directory creation fails; otherwise, nil.
 func mkdir(path string) (err error) {
 	if path == "" {
 		err = errors.New("invalid input, directory path is empty")
 
-		return
+		return err
 	}
 
 	if err = os.MkdirAll(path, 0o755); err != nil {
-		err = fmt.Errorf("failed to create directory '%s' with permissions 0755: %w", path, err)
+		err = fmt.Errorf("creating directory %q with permissions 0755: %w", path, err)
 
-		return
+		return err
 	}
 
-	return
+	return nil
 }
 
 // writeToFile writes the content of a byte slice to a file with restrictive permissions.
 //
 // The file is written with permissions 0600 (rw-------) to ensure security for sensitive data like
-// certificates and private keys. The function validates inputs and provides detailed error messages
-// for debugging purposes.
+// certificates and private keys. Note that the permissions apply only when the file is created;
+// an existing file keeps its current permissions.
 //
 // Parameters:
 //   - content ([]byte): A byte slice containing the data to write.
 //   - path (string): The file path where the content will be written.
 //
 // Returns:
-//   - err (error): An error with stack trace and metadata if file writing fails; otherwise, nil.
+//   - err (error): An error if file writing fails; otherwise, nil.
 func writeToFile(content []byte, path string) (err error) {
 	if path == "" {
 		err = errors.New("invalid input, file path is empty")
 
-		return
+		return err
 	}
 
 	if len(content) == 0 {
-		err = fmt.Errorf("invalid input, content to write to file '%s' is empty", path)
+		err = fmt.Errorf("invalid input, content to write to file %q is empty", path)
 
-		return
+		return err
 	}
 
 	if err = os.WriteFile(path, content, 0o600); err != nil {
-		err = fmt.Errorf("failed to write content to file '%s' with permissions 0600: %w", path, err)
+		err = fmt.Errorf("writing content to file %q with permissions 0600: %w", path, err)
+
+		return err
 	}
 
-	return
+	return nil
 }
