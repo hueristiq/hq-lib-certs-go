@@ -36,7 +36,7 @@ type caCertificatePrivateKeyOptions struct {
 }
 
 // KeyType enumerates the private key algorithms supported for CA generation. Select one with
-// [CACertificatePrivateKeyWithKeyType]; the zero value, [KeyTypeRSA2048], is used when unset.
+// [WithCAKeyType]; the zero value, [KeyTypeRSA2048], is used when unset.
 //
 // Because [CertificateAuthority.GenerateTLSCertificate] derives each leaf key from the CA's key,
 // the KeyType chosen for the CA also determines the algorithm of every certificate it issues.
@@ -63,21 +63,21 @@ const (
 	defaultLeafCertificateValidity = 24 * time.Hour
 )
 
-// CACertificatePrivateKeyOptionFunc is a function type used to configure caCertificatePrivateKeyOptions
+// CAOption is a function type used to configure caCertificatePrivateKeyOptions
 // using the functional options pattern. It allows flexible and extensible configuration of CA certificate options.
 //
 // Parameters:
 //   - opts (*caCertificatePrivateKeyOptions): A pointer to caCertificatePrivateKeyOptions to be modified.
-type CACertificatePrivateKeyOptionFunc func(opts *caCertificatePrivateKeyOptions)
+type CAOption func(opts *caCertificatePrivateKeyOptions)
 
 // A CertificateAuthority generates and signs TLS certificates from a single CA certificate and
 // its private key. It issues certificates dynamically for the hostname requested via Server Name
 // Indication (SNI) and caches them to avoid re-issuing on every connection; the cache size and
-// expiry are configurable (see [CertificateAuthorityWithCacheMaxSize] and
-// [CertificateAuthorityWithCacheMaxAge]).
+// expiry are configurable (see [WithCacheMaxSize] and
+// [WithCacheMaxAge]).
 //
 // The zero value is not usable: construct a CertificateAuthority with [New] (from an in-memory
-// certificate and key), with [NewWithBytesCertificatePrivateKey] (from PEM bytes), or generate a
+// certificate and key), with [NewFromPEM] (from PEM bytes), or generate a
 // fresh CA first with [GenerateCACertificatePrivateKey].
 //
 // A CertificateAuthority is safe for concurrent use by multiple goroutines; the certificate cache
@@ -95,19 +95,33 @@ type CertificateAuthority struct {
 	inflight      map[string]*inflightCall
 }
 
-// CACertificate returns the CA's X.509 certificate.
+// CACertificate returns a copy of the CA's X.509 certificate.
+//
+// The returned certificate is a shallow copy, so mutating its fields does not affect the authority.
 //
 // Returns:
-//   - certificate (*x509.Certificate): The CA's X.509 certificate used for signing TLS certificates.
+//   - certificate (*x509.Certificate): A copy of the CA's X.509 certificate used for signing TLS
+//     certificates, or nil if the authority is nil or uninitialized.
 func (ca *CertificateAuthority) CACertificate() (certificate *x509.Certificate) {
-	return ca.caCertificate
+	if ca == nil || ca.caCertificate == nil {
+		return nil
+	}
+
+	certificateCopy := *ca.caCertificate
+
+	return &certificateCopy
 }
 
 // CACertificatePrivateKey returns the CA's private key.
 //
 // Returns:
-//   - privateKey (crypto.Signer): The private key corresponding to the CA certificate, implementing crypto.Signer.
+//   - privateKey (crypto.Signer): The private key corresponding to the CA certificate, implementing
+//     crypto.Signer, or nil if the authority is nil or uninitialized.
 func (ca *CertificateAuthority) CACertificatePrivateKey() (privateKey crypto.Signer) {
+	if ca == nil {
+		return nil
+	}
+
 	return ca.caCertificatePrivateKey
 }
 
@@ -121,7 +135,7 @@ func (ca *CertificateAuthority) CACertificatePrivateKey() (privateKey crypto.Sig
 //
 // Parameters:
 //   - hosts ([]string): A slice of hostnames (e.g., DNS names, IPs, emails, or URIs) to include in the certificate.
-//   - ofs (...TLSCertificatePrivateKeyOptionFunc): A variadic list of TLSCertificatePrivateKeyOptionFunc functions to configure
+//   - ofs (...TLSOption): A variadic list of TLSOption functions to configure
 //     the certificate's properties (e.g., CommonName, Organization, ValidFrom, ValidFor).
 //
 // Returns:
@@ -129,7 +143,7 @@ func (ca *CertificateAuthority) CACertificatePrivateKey() (privateKey crypto.Sig
 //   - privateKey (crypto.Signer): The generated private key, implementing crypto.Signer.
 //   - err (error): An error if the authority is uninitialized, the inputs are invalid, or key generation, SKI generation,
 //     serial number generation, certificate creation, or parsing fails; otherwise, nil.
-func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TLSCertificatePrivateKeyOptionFunc) (certificate *x509.Certificate, privateKey crypto.Signer, err error) {
+func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TLSOption) (certificate *x509.Certificate, privateKey crypto.Signer, err error) {
 	if ca == nil {
 		err = errors.New("invalid input, CertificateAuthority is nil")
 
@@ -158,11 +172,8 @@ func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 
 	opts := &tlsCertificatePrivateKeyOptions{
 		CommonName: hosts[0],
-		Organization: []string{
-			"Acme Co",
-		},
-		ValidFrom: time.Now(),
-		ValidFor:  365 * 24 * time.Hour,
+		ValidFrom:  time.Now(),
+		ValidFor:   365 * 24 * time.Hour,
 	}
 
 	for _, f := range ofs {
@@ -292,6 +303,36 @@ func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 	return certificate, privateKey, nil
 }
 
+// TLSCertificate returns a TLS certificate for the given hostname, generating and caching it on
+// first use and serving the cached certificate on subsequent calls.
+//
+// The hostname is normalized before lookup (port stripped, Unicode NFC folded to lowercase, trailing
+// dot removed), and concurrent calls for the same host share a single generation. The returned
+// certificate chains to the CA certificate and has its Leaf field populated.
+//
+// Parameters:
+//   - hostname (string): The hostname to issue the certificate for (e.g., "example.com").
+//
+// Returns:
+//   - certificate (*tls.Certificate): The TLS certificate, including the certificate chain and private key.
+//   - err (error): An error if the authority is nil or uninitialized, or certificate generation fails;
+//     otherwise, nil.
+func (ca *CertificateAuthority) TLSCertificate(hostname string) (certificate *tls.Certificate, err error) {
+	if ca == nil {
+		err = errors.New("invalid input, CertificateAuthority is nil")
+
+		return nil, err
+	}
+
+	if ca.caCertificate == nil || ca.caCertificatePrivateKey == nil {
+		err = errors.New("invalid input, CertificateAuthority is not initialized")
+
+		return nil, err
+	}
+
+	return ca.getTLSCertificate(hostname)
+}
+
 // SignCSR signs a certificate signing request (CSR) with the CA's private key
 // and returns the resulting X.509 certificate.
 //
@@ -304,13 +345,13 @@ func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 //
 // Parameters:
 //   - csr (*x509.CertificateRequest): The parsed CSR to sign.
-//   - ofs (...TLSCertificatePrivateKeyOptionFunc): Optional overrides for
+//   - ofs (...TLSOption): Optional overrides for
 //     certificate properties.
 //
 // Returns:
 //   - certificate (*x509.Certificate): The signed certificate.
 //   - err (error): An error if the authority is uninitialized, CSR validation fails, or signing fails.
-func (ca *CertificateAuthority) SignCSR(csr *x509.CertificateRequest, ofs ...TLSCertificatePrivateKeyOptionFunc) (certificate *x509.Certificate, err error) {
+func (ca *CertificateAuthority) SignCSR(csr *x509.CertificateRequest, ofs ...TLSOption) (certificate *x509.Certificate, err error) {
 	if ca == nil {
 		err = errors.New("invalid input, CertificateAuthority is nil")
 
@@ -336,12 +377,10 @@ func (ca *CertificateAuthority) SignCSR(csr *x509.CertificateRequest, ofs ...TLS
 	}
 
 	opts := &tlsCertificatePrivateKeyOptions{
-		CommonName: csr.Subject.CommonName,
-		Organization: []string{
-			"Acme Co",
-		},
-		ValidFrom: time.Now(),
-		ValidFor:  365 * 24 * time.Hour,
+		CommonName:   csr.Subject.CommonName,
+		Organization: csr.Subject.Organization,
+		ValidFrom:    time.Now(),
+		ValidFor:     365 * 24 * time.Hour,
 	}
 
 	for _, f := range ofs {
@@ -427,25 +466,25 @@ func (ca *CertificateAuthority) SignCSR(csr *x509.CertificateRequest, ofs ...TLS
 	return certificate, nil
 }
 
-// TLSConfigOptionFunc is a function type used to configure the tls.Config produced by
+// TLSConfigOption is a function type used to configure the tls.Config produced by
 // [CertificateAuthority.NewTLSConfig] and [CertificateAuthority.NewTLSConfigWithHost].
 //
 // Parameters:
 //   - cfg (*tls.Config): A pointer to the tls.Config to be modified.
-type TLSConfigOptionFunc func(cfg *tls.Config)
+type TLSConfigOption func(cfg *tls.Config)
 
-// TLSConfigWithNextProtos sets the ALPN protocols advertised by the TLS configuration.
+// WithNextProtos sets the ALPN protocols advertised by the TLS configuration.
 //
 // When unset, the configuration defaults to advertising "h2" and "http/1.1", which suits HTTP
-// servers. Call TLSConfigWithNextProtos with no arguments to disable ALPN entirely, which is
+// servers. Call WithNextProtos with no arguments to disable ALPN entirely, which is
 // the right choice for non-HTTP servers.
 //
 // Parameters:
 //   - protos (...string): The ALPN protocol identifiers to advertise, in preference order.
 //
 // Returns:
-//   - (TLSConfigOptionFunc): A TLSConfigOptionFunc that updates the NextProtos field of the config.
-func TLSConfigWithNextProtos(protos ...string) TLSConfigOptionFunc {
+//   - (TLSConfigOption): A TLSConfigOption that updates the NextProtos field of the config.
+func WithNextProtos(protos ...string) TLSConfigOption {
 	return func(cfg *tls.Config) {
 		cfg.NextProtos = protos
 	}
@@ -453,15 +492,21 @@ func TLSConfigWithNextProtos(protos ...string) TLSConfigOptionFunc {
 
 // NewTLSConfig creates a TLS configuration for use in a TLS server.
 //
+// If the authority is nil or uninitialized, the returned configuration fails every handshake with
+// an error instead of silently serving TLS without dynamic certificates.
+//
 // Parameters:
-//   - ofs (...TLSConfigOptionFunc): A variadic list of TLSConfigOptionFunc functions to configure
-//     the returned tls.Config (e.g., [TLSConfigWithNextProtos]).
+//   - ofs (...TLSConfigOption): A variadic list of TLSConfigOption functions to configure
+//     the returned tls.Config (e.g., [WithNextProtos]).
 //
 // Returns:
 //   - cfg (*tls.Config): A pointer to a tls.Config with a dynamic certificate generation function.
-func (ca *CertificateAuthority) NewTLSConfig(ofs ...TLSConfigOptionFunc) (cfg *tls.Config) {
+func (ca *CertificateAuthority) NewTLSConfig(ofs ...TLSConfigOption) (cfg *tls.Config) {
+	// A nil authority behaves as an uninitialized one: the returned configuration
+	// fails every handshake with an error instead of silently serving TLS without
+	// dynamic certificates.
 	if ca == nil {
-		return nil
+		ca = &CertificateAuthority{}
 	}
 
 	cfg = &tls.Config{
@@ -496,17 +541,22 @@ func (ca *CertificateAuthority) NewTLSConfig(ofs ...TLSConfigOptionFunc) (cfg *t
 // NewTLSConfigWithHost creates a TLS configuration for a specific hostname.
 //
 // Similar to NewTLSConfig, but allows specifying a default hostname to use when SNI is not provided.
+// If the authority is nil or uninitialized, the returned configuration fails every handshake with
+// an error instead of silently serving TLS without dynamic certificates.
 //
 // Parameters:
 //   - hostname (string): The default hostname to use if SNI is not provided.
-//   - ofs (...TLSConfigOptionFunc): A variadic list of TLSConfigOptionFunc functions to configure
-//     the returned tls.Config (e.g., [TLSConfigWithNextProtos]).
+//   - ofs (...TLSConfigOption): A variadic list of TLSConfigOption functions to configure
+//     the returned tls.Config (e.g., [WithNextProtos]).
 //
 // Returns:
 //   - cfg (*tls.Config): A pointer to a tls.Config with a dynamic certificate generation function.
-func (ca *CertificateAuthority) NewTLSConfigWithHost(hostname string, ofs ...TLSConfigOptionFunc) (cfg *tls.Config) {
+func (ca *CertificateAuthority) NewTLSConfigWithHost(hostname string, ofs ...TLSConfigOption) (cfg *tls.Config) {
+	// A nil authority behaves as an uninitialized one: the returned configuration
+	// fails every handshake with an error instead of silently serving TLS without
+	// dynamic certificates.
 	if ca == nil {
-		return nil
+		ca = &CertificateAuthority{}
 	}
 
 	cfg = &tls.Config{
@@ -611,7 +661,7 @@ func (ca *CertificateAuthority) getTLSCertificate(hostname string) (certificate 
 //   - certificate (*tls.Certificate): The generated TLS certificate, including the chain and private key.
 //   - err (error): An error if certificate generation fails; otherwise, nil.
 func (ca *CertificateAuthority) generateAndCacheTLSCertificate(host string) (certificate *tls.Certificate, err error) {
-	leafCertificate, leafPrivateKey, err := ca.GenerateTLSCertificate([]string{host}, TLSCertificatePrivateKeyWithValidFor(defaultLeafCertificateValidity))
+	leafCertificate, leafPrivateKey, err := ca.GenerateTLSCertificate([]string{host}, WithTLSValidFor(defaultLeafCertificateValidity))
 	if err != nil {
 		err = fmt.Errorf("generating TLS certificate for host %q: %w", host, err)
 
@@ -709,66 +759,66 @@ type tlsCertificatePrivateKeyOptions struct {
 	ExtKeyUsage  []x509.ExtKeyUsage
 }
 
-// TLSCertificatePrivateKeyOptionFunc is a function type for configuring tlsCertificatePrivateKeyOptions
+// TLSOption is a function type for configuring tlsCertificatePrivateKeyOptions
 // using the functional options pattern. It allows flexible configuration of TLS certificate options.
 //
 // Parameters:
 //   - opts (*tlsCertificatePrivateKeyOptions): A pointer to tlsCertificatePrivateKeyOptions to be modified.
-type TLSCertificatePrivateKeyOptionFunc func(opts *tlsCertificatePrivateKeyOptions)
+type TLSOption func(opts *tlsCertificatePrivateKeyOptions)
 
-// CACertificatePrivateKeyWithCommonName sets the Common Name (CN) for the CA certificate's subject.
+// WithCACommonName sets the Common Name (CN) for the CA certificate's subject.
 //
 // Parameters:
-//   - commonName (string): The Common Name to set in the certificate's subject (e.g., "Acme CA").
+//   - commonName (string): The Common Name to set in the certificate's subject (e.g., "Example Root CA").
 //
 // Returns:
-//   - (CACertificatePrivateKeyOptionFunc): A CACertificatePrivateKeyOptionFunc that updates the CommonName field of the options.
-func CACertificatePrivateKeyWithCommonName(commonName string) CACertificatePrivateKeyOptionFunc {
+//   - (CAOption): A CAOption that updates the CommonName field of the options.
+func WithCACommonName(commonName string) CAOption {
 	return func(opts *caCertificatePrivateKeyOptions) {
 		opts.CommonName = commonName
 	}
 }
 
-// CACertificatePrivateKeyWithOrganization sets the Organization field for the CA certificate's subject.
+// WithCAOrganization sets the Organization field for the CA certificate's subject.
 //
 // Parameters:
-//   - organization ([]string): A slice of organization names to set in the certificate's subject (e.g., ["Acme Co"]).
+//   - organization ([]string): A slice of organization names to set in the certificate's subject (e.g., ["Example Org"]).
 //
 // Returns:
-//   - (CACertificatePrivateKeyOptionFunc): A CACertificatePrivateKeyOptionFunc that updates the Organization field of the options.
-func CACertificatePrivateKeyWithOrganization(organization []string) CACertificatePrivateKeyOptionFunc {
+//   - (CAOption): A CAOption that updates the Organization field of the options.
+func WithCAOrganization(organization []string) CAOption {
 	return func(opts *caCertificatePrivateKeyOptions) {
 		opts.Organization = organization
 	}
 }
 
-// CACertificatePrivateKeyWithValidFrom sets the start time for the CA certificate's validity period.
+// WithCAValidFrom sets the start time for the CA certificate's validity period.
 //
 // Parameters:
 //   - validFrom (time.Time): The time from which the certificate is valid (e.g., time.Now()).
 //
 // Returns:
-//   - (CACertificatePrivateKeyOptionFunc): A CACertificatePrivateKeyOptionFunc that updates the ValidFrom field of the options.
-func CACertificatePrivateKeyWithValidFrom(validFrom time.Time) CACertificatePrivateKeyOptionFunc {
+//   - (CAOption): A CAOption that updates the ValidFrom field of the options.
+func WithCAValidFrom(validFrom time.Time) CAOption {
 	return func(opts *caCertificatePrivateKeyOptions) {
 		opts.ValidFrom = validFrom
 	}
 }
 
-// CACertificatePrivateKeyWithValidFor sets the duration for the CA certificate's validity period.
+// WithCAValidFor sets the duration for the CA certificate's validity period.
 //
 // Parameters:
 //   - validFor (time.Duration): The duration for which the certificate is valid from ValidFrom (e.g., 365*24*time.Hour).
 //
 // Returns:
-//   - (CACertificatePrivateKeyOptionFunc): A CACertificatePrivateKeyOptionFunc that updates the ValidFor field of the options.
-func CACertificatePrivateKeyWithValidFor(validFor time.Duration) CACertificatePrivateKeyOptionFunc {
+//   - (CAOption): A CAOption that updates the ValidFor field of the options.
+func WithCAValidFor(validFor time.Duration) CAOption {
 	return func(opts *caCertificatePrivateKeyOptions) {
 		opts.ValidFor = validFor
 	}
 }
 
-// CACertificatePrivateKeyWithKeyType sets the private key algorithm for the generated CA.
+// WithCAKeyType sets the private key algorithm for the generated CA.
 //
 // When unset, the CA defaults to KeyTypeRSA2048. Choosing KeyTypeECDSAP256 or KeyTypeED25519
 // also makes every leaf certificate issued by the resulting CA use that algorithm, since leaf
@@ -778,8 +828,8 @@ func CACertificatePrivateKeyWithValidFor(validFor time.Duration) CACertificatePr
 //   - keyType (KeyType): The key algorithm to use (KeyTypeRSA2048, KeyTypeECDSAP256, or KeyTypeED25519).
 //
 // Returns:
-//   - (CACertificatePrivateKeyOptionFunc): A CACertificatePrivateKeyOptionFunc that updates the KeyType field of the options.
-func CACertificatePrivateKeyWithKeyType(keyType KeyType) CACertificatePrivateKeyOptionFunc {
+//   - (CAOption): A CAOption that updates the KeyType field of the options.
+func WithCAKeyType(keyType KeyType) CAOption {
 	return func(opts *caCertificatePrivateKeyOptions) {
 		opts.KeyType = keyType
 	}
@@ -790,10 +840,11 @@ func CACertificatePrivateKeyWithKeyType(keyType KeyType) CACertificatePrivateKey
 // This function creates a private key (RSA, ECDSA, or Ed25519 based on configuration) and a self-signed CA certificate
 // using the functional options pattern. The certificate includes a random serial number, a subject key identifier (SKI),
 // and is configured for certificate signing and CRL signing, as per RFC 5280. The validity period starts at ValidFrom
-// (defaulting to the current time) and extends for ValidFor (defaulting to 365 days).
+// (defaulting to the current time) and extends for ValidFor (defaulting to 365 days). The Common Name has no default
+// and must be set with [WithCACommonName]; the Organization is empty unless set with [WithCAOrganization].
 //
 // Parameters:
-//   - ofs (...CACertificatePrivateKeyOptionFunc): A variadic list of CACertificatePrivateKeyOptionFunc functions to configure
+//   - ofs (...CAOption): A variadic list of CAOption functions to configure
 //     the certificate's properties (e.g., CommonName, Organization, ValidFrom, ValidFor).
 //
 // Returns:
@@ -801,12 +852,8 @@ func CACertificatePrivateKeyWithKeyType(keyType KeyType) CACertificatePrivateKey
 //   - privateKey (crypto.Signer): The generated private key, implementing crypto.Signer.
 //   - err (error): An error if the inputs are invalid or key generation, SKI generation, serial number generation,
 //     certificate creation, or parsing fails; otherwise, nil.
-func GenerateCACertificatePrivateKey(ofs ...CACertificatePrivateKeyOptionFunc) (certificate *x509.Certificate, privateKey crypto.Signer, err error) {
+func GenerateCACertificatePrivateKey(ofs ...CAOption) (certificate *x509.Certificate, privateKey crypto.Signer, err error) {
 	opts := &caCertificatePrivateKeyOptions{
-		CommonName: "Acme CA",
-		Organization: []string{
-			"Acme Co",
-		},
 		ValidFrom: time.Now(),
 		ValidFor:  365 * 24 * time.Hour,
 	}
@@ -904,19 +951,19 @@ func GenerateCACertificatePrivateKey(ofs ...CACertificatePrivateKeyOptionFunc) (
 	return certificate, privateKey, nil
 }
 
-// GenerateCACertificatePrivateKeyBytes generates a new X.509 CA certificate and private key, returning them in PEM format.
+// GenerateCACertificatePrivateKeyPEM generates a new X.509 CA certificate and private key, returning them in PEM format.
 //
 // This function wraps GenerateCACertificatePrivateKey and converts the resulting certificate and private key to PEM format.
 //
 // Parameters:
-//   - ofs (...CACertificatePrivateKeyOptionFunc): A variadic list of CACertificatePrivateKeyOptionFunc functions to configure
+//   - ofs (...CAOption): A variadic list of CAOption functions to configure
 //     the certificate's properties (e.g., CommonName, Organization, ValidFrom, ValidFor).
 //
 // Returns:
 //   - certificateBytes ([]byte): The PEM-encoded CA certificate.
 //   - privateKeyBytes ([]byte): The PEM-encoded private key.
 //   - err (error): An error if generation or PEM encoding fails; otherwise, nil.
-func GenerateCACertificatePrivateKeyBytes(ofs ...CACertificatePrivateKeyOptionFunc) (certificateBytes, privateKeyBytes []byte, err error) {
+func GenerateCACertificatePrivateKeyPEM(ofs ...CAOption) (certificateBytes, privateKeyBytes []byte, err error) {
 	certificate, privateKey, err := GenerateCACertificatePrivateKey(ofs...)
 	if err != nil {
 		err = fmt.Errorf("generating CA certificate and private key: %w", err)
@@ -1032,59 +1079,59 @@ func PrivateKeyToPEM(key crypto.Signer) (raw []byte, err error) {
 	return pem.EncodeToMemory(block), nil
 }
 
-// TLSCertificatePrivateKeyWithCommonName sets the Common Name (CN) for the TLS certificate's subject.
+// WithTLSCommonName sets the Common Name (CN) for the TLS certificate's subject.
 //
 // Parameters:
 //   - commonName (string): The Common Name to set in the certificate's subject (e.g., "example.com").
 //
 // Returns:
-//   - (TLSCertificatePrivateKeyOptionFunc): A TLSCertificatePrivateKeyOptionFunc that updates the CommonName field of the options.
-func TLSCertificatePrivateKeyWithCommonName(commonName string) TLSCertificatePrivateKeyOptionFunc {
+//   - (TLSOption): A TLSOption that updates the CommonName field of the options.
+func WithTLSCommonName(commonName string) TLSOption {
 	return func(opts *tlsCertificatePrivateKeyOptions) {
 		opts.CommonName = commonName
 	}
 }
 
-// TLSCertificatePrivateKeyWithOrganization sets the Organization field for the TLS certificate's subject.
+// WithTLSOrganization sets the Organization field for the TLS certificate's subject.
 //
 // Parameters:
 //   - organization ([]string): A slice of organization names to set in the certificate's subject (e.g., ["My Org"]).
 //
 // Returns:
-//   - (TLSCertificatePrivateKeyOptionFunc): A TLSCertificatePrivateKeyOptionFunc that updates the Organization field of the options.
-func TLSCertificatePrivateKeyWithOrganization(organization []string) TLSCertificatePrivateKeyOptionFunc {
+//   - (TLSOption): A TLSOption that updates the Organization field of the options.
+func WithTLSOrganization(organization []string) TLSOption {
 	return func(opts *tlsCertificatePrivateKeyOptions) {
 		opts.Organization = organization
 	}
 }
 
-// TLSCertificatePrivateKeyWithValidFrom sets the start time for the TLS certificate's validity period.
+// WithTLSValidFrom sets the start time for the TLS certificate's validity period.
 //
 // Parameters:
 //   - validFrom (time.Time): The time from which the certificate is valid (e.g., time.Now()).
 //
 // Returns:
-//   - (TLSCertificatePrivateKeyOptionFunc): A TLSCertificatePrivateKeyOptionFunc that updates the ValidFrom field of the options.
-func TLSCertificatePrivateKeyWithValidFrom(validFrom time.Time) TLSCertificatePrivateKeyOptionFunc {
+//   - (TLSOption): A TLSOption that updates the ValidFrom field of the options.
+func WithTLSValidFrom(validFrom time.Time) TLSOption {
 	return func(opts *tlsCertificatePrivateKeyOptions) {
 		opts.ValidFrom = validFrom
 	}
 }
 
-// TLSCertificatePrivateKeyWithValidFor sets the duration for the TLS certificate's validity period.
+// WithTLSValidFor sets the duration for the TLS certificate's validity period.
 //
 // Parameters:
 //   - validFor (time.Duration): The duration for which the certificate is valid from ValidFrom (e.g., 24*time.Hour).
 //
 // Returns:
-//   - (TLSCertificatePrivateKeyOptionFunc): A TLSCertificatePrivateKeyOptionFunc that updates the ValidFor field of the options.
-func TLSCertificatePrivateKeyWithValidFor(validFor time.Duration) TLSCertificatePrivateKeyOptionFunc {
+//   - (TLSOption): A TLSOption that updates the ValidFor field of the options.
+func WithTLSValidFor(validFor time.Duration) TLSOption {
 	return func(opts *tlsCertificatePrivateKeyOptions) {
 		opts.ValidFor = validFor
 	}
 }
 
-// TLSCertificatePrivateKeyWithExtKeyUsage sets the extended key usages for the TLS certificate.
+// WithTLSExtKeyUsage sets the extended key usages for the TLS certificate.
 //
 // When unset, the certificate defaults to [x509.ExtKeyUsageServerAuth], preserving the
 // behaviour of certificates issued before this option existed. Pass
@@ -1094,8 +1141,8 @@ func TLSCertificatePrivateKeyWithValidFor(validFor time.Duration) TLSCertificate
 //   - usages (...x509.ExtKeyUsage): One or more extended key usages to set on the certificate.
 //
 // Returns:
-//   - (TLSCertificatePrivateKeyOptionFunc): A TLSCertificatePrivateKeyOptionFunc that updates the ExtKeyUsage field of the options.
-func TLSCertificatePrivateKeyWithExtKeyUsage(usages ...x509.ExtKeyUsage) TLSCertificatePrivateKeyOptionFunc {
+//   - (TLSOption): A TLSOption that updates the ExtKeyUsage field of the options.
+func WithTLSExtKeyUsage(usages ...x509.ExtKeyUsage) TLSOption {
 	return func(opts *tlsCertificatePrivateKeyOptions) {
 		opts.ExtKeyUsage = usages
 	}
@@ -1108,34 +1155,34 @@ type certificateAuthorityOptions struct {
 	CacheMaxSize int
 }
 
-// CertificateAuthorityOptionFunc is a function type used to configure certificateAuthorityOptions
+// AuthorityOption is a function type used to configure certificateAuthorityOptions
 // using the functional options pattern.
 //
 // Parameters:
 //   - opts (*certificateAuthorityOptions): A pointer to certificateAuthorityOptions to be modified.
-type CertificateAuthorityOptionFunc func(opts *certificateAuthorityOptions)
+type AuthorityOption func(opts *certificateAuthorityOptions)
 
-// CertificateAuthorityWithCacheMaxAge sets the maximum age of cached certificates before they expire.
+// WithCacheMaxAge sets the maximum age of cached certificates before they expire.
 //
 // Parameters:
 //   - maxAge (time.Duration): The maximum age for cached certificates (e.g., 1*time.Hour).
 //
 // Returns:
-//   - (CertificateAuthorityOptionFunc): A CertificateAuthorityOptionFunc that updates the CacheMaxAge field of the options.
-func CertificateAuthorityWithCacheMaxAge(maxAge time.Duration) CertificateAuthorityOptionFunc {
+//   - (AuthorityOption): A AuthorityOption that updates the CacheMaxAge field of the options.
+func WithCacheMaxAge(maxAge time.Duration) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
 		opts.CacheMaxAge = maxAge
 	}
 }
 
-// CertificateAuthorityWithCacheMaxSize sets the maximum number of certificates to store in the cache.
+// WithCacheMaxSize sets the maximum number of certificates to store in the cache.
 //
 // Parameters:
 //   - maxSize (int): The maximum number of cached certificates (e.g., 1024).
 //
 // Returns:
-//   - (CertificateAuthorityOptionFunc): A CertificateAuthorityOptionFunc that updates the CacheMaxSize field of the options.
-func CertificateAuthorityWithCacheMaxSize(maxSize int) CertificateAuthorityOptionFunc {
+//   - (AuthorityOption): A AuthorityOption that updates the CacheMaxSize field of the options.
+func WithCacheMaxSize(maxSize int) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
 		opts.CacheMaxSize = maxSize
 	}
@@ -1146,17 +1193,17 @@ func CertificateAuthorityWithCacheMaxSize(maxSize int) CertificateAuthorityOptio
 // It verifies that the certificate is configured as a CA, has the necessary key usage for certificate
 // signing, and that the private key matches the certificate's public key (RSA, ECDSA, or Ed25519).
 // The cache is initialized with a default maximum age of 1 hour and maximum size of 5 entries, both of
-// which can be overridden via CertificateAuthorityOptionFunc options.
+// which can be overridden via AuthorityOption options.
 //
 // Parameters:
 //   - caCertificate (*x509.Certificate): A pointer to the X.509 CA certificate.
 //   - caPrivateKey (crypto.Signer): The private key corresponding to the CA certificate, implementing crypto.Signer.
-//   - ofs (...CertificateAuthorityOptionFunc): A variadic list of options to configure the certificate cache.
+//   - ofs (...AuthorityOption): A variadic list of options to configure the certificate cache.
 //
 // Returns:
 //   - ca (*CertificateAuthority): A pointer to the initialized CertificateAuthority.
 //   - err (error): An error if the CA certificate or private key is invalid, mismatched, or incompatible; otherwise, nil.
-func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...CertificateAuthorityOptionFunc) (ca *CertificateAuthority, err error) {
+func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...AuthorityOption) (ca *CertificateAuthority, err error) {
 	if caCertificate == nil {
 		err = errors.New("invalid input, CA certificate is nil")
 
@@ -1260,7 +1307,7 @@ func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...Cer
 	return ca, nil
 }
 
-// NewWithBytesCertificatePrivateKey initializes a new CertificateAuthority from PEM-encoded certificate and private key bytes.
+// NewFromPEM initializes a new CertificateAuthority from PEM-encoded certificate and private key bytes.
 //
 // It parses the certificate and private key from the provided byte slices, supporting PKCS#1, PKCS#8, and ECDSA private key formats.
 // The parsed certificate and private key are then used to initialize a CertificateAuthority.
@@ -1268,12 +1315,12 @@ func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...Cer
 // Parameters:
 //   - caCertificateBytes ([]byte): The PEM-encoded CA certificate bytes.
 //   - caPrivateKeyBytes ([]byte): The PEM-encoded private key bytes.
-//   - ofs (...CertificateAuthorityOptionFunc): A variadic list of options to configure the certificate cache.
+//   - ofs (...AuthorityOption): A variadic list of options to configure the certificate cache.
 //
 // Returns:
 //   - ca (*CertificateAuthority): A pointer to the initialized CertificateAuthority.
 //   - err (error): An error if parsing or initialization fails; otherwise, nil.
-func NewWithBytesCertificatePrivateKey(caCertificateBytes, caPrivateKeyBytes []byte, ofs ...CertificateAuthorityOptionFunc) (ca *CertificateAuthority, err error) {
+func NewFromPEM(caCertificateBytes, caPrivateKeyBytes []byte, ofs ...AuthorityOption) (ca *CertificateAuthority, err error) {
 	if len(caCertificateBytes) == 0 {
 		err = errors.New("invalid input, CA certificate bytes are empty")
 

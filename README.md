@@ -48,22 +48,22 @@ import (
 	"log"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
 )
 
 func main() {
 	// Generate a CA certificate with custom options.
-	caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-		certs.CACertificatePrivateKeyWithCommonName("My Root CA"),
-		certs.CACertificatePrivateKeyWithOrganization([]string{"My Company"}),
-		certs.CACertificatePrivateKeyWithValidFor(365*24*time.Hour),
+	caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
+		hqgocerts.WithCACommonName("My Root CA"),
+		hqgocerts.WithCAOrganization([]string{"My Company"}),
+		hqgocerts.WithCAValidFor(365*24*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Save to PEM files.
-	if err = certs.SaveCertificatePrivateKeyToFiles(caCert, "ca-cert.pem", caKey, "ca-key.pem"); err != nil {
+	if err = hqgocerts.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
 		log.Fatalf("Failed to save CA certificate: %v", err)
 	}
 
@@ -73,12 +73,12 @@ func main() {
 
 ### Choosing the Key Algorithm
 
-Pass `CACertificatePrivateKeyWithKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
+Pass `WithCAKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
 
 ```go
-caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-	certs.CACertificatePrivateKeyWithCommonName("My Root CA"),
-	certs.CACertificatePrivateKeyWithKeyType(certs.KeyTypeECDSAP256),
+caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
+	hqgocerts.WithCACommonName("My Root CA"),
+	hqgocerts.WithCAKeyType(hqgocerts.KeyTypeECDSAP256),
 )
 ```
 
@@ -94,25 +94,25 @@ package main
 import (
 	"log"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
 )
 
 func main() {
-	caCert, caKey, err := certs.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgocerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
-	log.Println("Successfully loaded CA certificate and key")
+	log.Printf("Loaded CA certificate %q with key type %T\n", caCert.Subject.CommonName, caKey)
 }
 ```
 
 ### Loading a CA from PEM Bytes
 
-When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewWithBytesCertificatePrivateKey`.
+When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewFromPEM`.
 
 ```go
-ca, err := certs.NewWithBytesCertificatePrivateKey(caCertPEM, caKeyPEM)
+ca, err := hqgocerts.NewFromPEM(caCertPEM, caKeyPEM)
 if err != nil {
 	log.Fatalf("Failed to initialize CA: %v", err)
 }
@@ -129,18 +129,18 @@ import (
 	"log"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
 )
 
 func main() {
 	// Load CA certificate and private key.
-	caCert, caKey, err := certs.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgocerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
 	// Initialize the CertificateAuthority.
-	ca, err := certs.New(caCert, caKey)
+	ca, err := hqgocerts.New(caCert, caKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
 	}
@@ -148,16 +148,16 @@ func main() {
 	// Generate a TLS certificate for multiple hosts.
 	tlsCert, tlsKey, err := ca.GenerateTLSCertificate(
 		[]string{"example.com", "www.example.com", "192.168.1.1", "user@example.com"},
-		certs.TLSCertificatePrivateKeyWithCommonName("example.com"),
-		certs.TLSCertificatePrivateKeyWithOrganization([]string{"My Company"}),
-		certs.TLSCertificatePrivateKeyWithValidFor(30*24*time.Hour), // 30 days
+		hqgocerts.WithTLSCommonName("example.com"),
+		hqgocerts.WithTLSOrganization([]string{"My Company"}),
+		hqgocerts.WithTLSValidFor(30*24*time.Hour), // 30 days
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate TLS certificate: %v", err)
 	}
 
 	// Save the TLS certificate and key.
-	if err := certs.SaveCertificatePrivateKeyToFiles(tlsCert, "tls-cert.pem", tlsKey, "tls-key.pem"); err != nil {
+	if err := hqgocerts.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
 		log.Fatalf("Failed to save TLS certificate: %v", err)
 	}
 
@@ -170,7 +170,7 @@ Certificates default to server authentication. To issue a client certificate for
 ```go
 clientCert, clientKey, err := ca.GenerateTLSCertificate(
 	[]string{"client.example.com"},
-	certs.TLSCertificatePrivateKeyWithExtKeyUsage(x509.ExtKeyUsageClientAuth),
+	hqgocerts.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
 )
 ```
 
@@ -186,20 +186,22 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
 )
 
 func main() {
 	// Generate or load the CA certificate and key.
-	caCert, caKey, err := certs.GenerateCACertificatePrivateKey()
+	caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
+		hqgocerts.WithCACommonName("My Root CA"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Initialize the CertificateAuthority, tuning the certificate cache.
-	ca, err := certs.New(caCert, caKey,
-		certs.CertificateAuthorityWithCacheMaxSize(1024),
-		certs.CertificateAuthorityWithCacheMaxAge(6*time.Hour),
+	ca, err := hqgocerts.New(caCert, caKey,
+		hqgocerts.WithCacheMaxSize(1024),
+		hqgocerts.WithCacheMaxAge(6*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
@@ -217,6 +219,7 @@ func main() {
 	}
 
 	log.Println("Starting TLS server on :443")
+
 	if err := server.ListenAndServeTLS("", ""); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}

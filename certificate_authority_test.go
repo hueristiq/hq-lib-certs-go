@@ -7,11 +7,15 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"net/http"
-	"net/http/httptest"
+	"encoding/pem"
+	"errors"
+	"io"
+	"net"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -20,537 +24,1576 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testKeyTypes enumerates the supported CA key types for table-driven subtests.
+var testKeyTypes = []struct {
+	name    string
+	keyType KeyType
+}{
+	{"rsa", KeyTypeRSA2048},
+	{"ecdsa", KeyTypeECDSAP256},
+	{"ed25519", KeyTypeED25519},
+}
+
+// newTestCACertificatePrivateKey generates a CA certificate and private key for tests.
+// WithCACommonName("Test CA") is prepended to ofs so callers may override it.
+func newTestCACertificatePrivateKey(t *testing.T, ofs ...CAOption) (certificate *x509.Certificate, privateKey crypto.Signer) {
+	t.Helper()
+
+	ofs = append([]CAOption{WithCACommonName("Test CA")}, ofs...)
+
+	certificate, privateKey, err := GenerateCACertificatePrivateKey(ofs...)
+	require.NoError(t, err)
+	require.NotNil(t, certificate)
+	require.NotNil(t, privateKey)
+
+	return certificate, privateKey
+}
+
+// newTestAuthority builds a CertificateAuthority from a freshly generated test CA.
+func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuthority) {
+	t.Helper()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t)
+
+	ca, err := New(caCertificate, caPrivateKey, ofs...)
+	require.NoError(t, err)
+	require.NotNil(t, ca)
+
+	return ca
+}
+
+// newTestCSR builds and parses an Ed25519 certificate signing request with the
+// given Common Name and DNS SANs.
+func newTestCSR(t *testing.T, commonName string, dnsNames []string) (csr *x509.CertificateRequest) {
+	t.Helper()
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{"Test Org"},
+		},
+		DNSNames: dnsNames,
+	}
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, privateKey)
+	require.NoError(t, err)
+
+	csr, err = x509.ParseCertificateRequest(csrDER)
+	require.NoError(t, err)
+
+	return csr
+}
+
+// requirePublicKeysEqual asserts that two public keys encode to the same PKIX bytes.
+func requirePublicKeysEqual(t *testing.T, expected, actual crypto.PublicKey) {
+	t.Helper()
+
+	expectedDER, err := x509.MarshalPKIXPublicKey(expected)
+	require.NoError(t, err)
+
+	actualDER, err := x509.MarshalPKIXPublicKey(actual)
+	require.NoError(t, err)
+
+	assert.Equal(t, expectedDER, actualDER)
+}
+
+// handshakeOverPipe runs a TLS handshake between a server and a client over an
+// in-memory pipe, so no network ports are involved. It returns the client-side
+// connection state along with both handshake outcomes.
+func handshakeOverPipe(t *testing.T, serverConfig, clientConfig *tls.Config) (clientState tls.ConnectionState, serverErr, clientErr error) {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+
+	server := tls.Server(serverConn, serverConfig)
+	client := tls.Client(clientConn, clientConfig)
+
+	serverErrCh := make(chan error, 1)
+
+	go func() {
+		serverErrCh <- server.HandshakeContext(t.Context())
+	}()
+
+	clientErr = client.HandshakeContext(t.Context())
+	clientState = client.ConnectionState()
+
+	// Closing the client end unblocks a server handshake that is still waiting
+	// (for example after the client aborted with an alert).
+	_ = clientConn.Close()
+
+	serverErr = <-serverErrCh
+
+	_ = serverConn.Close()
+
+	return clientState, serverErr, clientErr
+}
+
 func TestNewSuccess(t *testing.T) {
 	t.Parallel()
 
-	cert, key, err := GenerateCACertificatePrivateKey()
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t)
+
+	ca, err := New(caCertificate, caPrivateKey)
 	require.NoError(t, err)
+	require.NotNil(t, ca)
 
-	ca, err := New(cert, key)
-	require.NoError(t, err)
+	assert.Equal(t, time.Hour, ca.cacheMaxAge)
+	assert.Equal(t, 5, ca.cacheMaxSize)
+	assert.NotNil(t, ca.cache)
+	assert.NotNil(t, ca.inflight)
 
-	assert.Same(t, cert, ca.CACertificate())
-	assert.Equal(t, key, ca.CACertificatePrivateKey())
-}
-
-func TestNewCacheOptions(t *testing.T) {
-	t.Parallel()
-
-	cert, key, err := GenerateCACertificatePrivateKey()
-	require.NoError(t, err)
-
-	ca, err := New(cert, key,
-		CertificateAuthorityWithCacheMaxAge(2*time.Hour),
-		CertificateAuthorityWithCacheMaxSize(99),
-	)
-	require.NoError(t, err)
-
-	assert.Equal(t, 2*time.Hour, ca.cacheMaxAge)
-	assert.Equal(t, 99, ca.cacheMaxSize)
+	assert.Equal(t, caCertificate.Raw, ca.CACertificate().Raw)
+	assert.Same(t, caPrivateKey, ca.CACertificatePrivateKey())
 }
 
 func TestNewValidation(t *testing.T) {
 	t.Parallel()
 
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	rsaCertificate, rsaPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
+	ecdsaCertificate, ecdsaPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
+	ed25519Certificate, ed25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+
+	_, otherEd25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+
+	authority, err := New(ecdsaCertificate, ecdsaPrivateKey)
 	require.NoError(t, err)
 
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafCertificate, _, err := authority.GenerateTLSCertificate([]string{"leaf.example.com"})
 	require.NoError(t, err)
 
-	_, err = New(nil, rsaKey)
-	require.ErrorContains(t, err, "CA certificate is nil")
+	withoutCertSign := *rsaCertificate
+	withoutCertSign.KeyUsage = x509.KeyUsageCRLSign
 
-	_, err = New(&x509.Certificate{IsCA: false}, rsaKey)
-	require.ErrorContains(t, err, "not configured as a CA")
+	unsupportedPublicKeyCertificate := &x509.Certificate{
+		IsCA:      true,
+		KeyUsage:  x509.KeyUsageCertSign,
+		PublicKey: "unsupported",
+	}
 
-	noSign := &x509.Certificate{IsCA: true, KeyUsage: x509.KeyUsageDigitalSignature, PublicKey: &rsaKey.PublicKey}
-	_, err = New(noSign, rsaKey)
-	require.ErrorContains(t, err, "KeyUsageCertSign")
+	tests := []struct {
+		name        string
+		certificate *x509.Certificate
+		privateKey  crypto.Signer
+		errContains string
+	}{
+		{"nil certificate", nil, rsaPrivateKey, "CA certificate is nil"},
+		{"certificate is not a CA", leafCertificate, ecdsaPrivateKey, "not configured as a CA"},
+		{"CA certificate lacks cert sign usage", &withoutCertSign, rsaPrivateKey, "lacks KeyUsageCertSign"},
+		{"nil private key", rsaCertificate, nil, "CA private key is nil"},
+		{"RSA certificate with ECDSA private key", rsaCertificate, ecdsaPrivateKey, "certificate public key is RSA, but private key is"},
+		{"ECDSA certificate with Ed25519 private key", ecdsaCertificate, ed25519PrivateKey, "certificate public key is ECDSA, but private key is"},
+		{"Ed25519 certificate with RSA private key", ed25519Certificate, rsaPrivateKey, "certificate public key is Ed25519, but private key is"},
+		{"private key does not match public key", ed25519Certificate, otherEd25519PrivateKey, "does not match the certificate's public key"},
+		{"unsupported public key type", unsupportedPublicKeyCertificate, ed25519PrivateKey, "unsupported certificate public key type"},
+	}
 
-	validRSA := &x509.Certificate{IsCA: true, KeyUsage: x509.KeyUsageCertSign, PublicKey: &rsaKey.PublicKey}
-	_, err = New(validRSA, nil)
-	require.ErrorContains(t, err, "CA private key is nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = New(validRSA, ecKey)
-	require.ErrorContains(t, err, "private key is")
-
-	unsupported := &x509.Certificate{IsCA: true, KeyUsage: x509.KeyUsageCertSign, PublicKey: fakePublicKey{}}
-	_, err = New(unsupported, rsaKey)
-	require.ErrorContains(t, err, "unsupported certificate public key type")
+			ca, err := New(tt.certificate, tt.privateKey)
+			require.ErrorContains(t, err, tt.errContains)
+			assert.Nil(t, ca)
+		})
+	}
 }
 
 func TestNewRejectsInvalidCacheOptions(t *testing.T) {
 	t.Parallel()
 
-	cert, key, err := GenerateCACertificatePrivateKey()
-	require.NoError(t, err)
-
-	_, err = New(cert, key, CertificateAuthorityWithCacheMaxSize(0))
-	require.ErrorContains(t, err, "cache max size")
-
-	_, err = New(cert, key, CertificateAuthorityWithCacheMaxAge(-time.Second))
-	require.ErrorContains(t, err, "cache max age")
-}
-
-func TestNewTLSConfigDefaults(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	cfg := ca.NewTLSConfig()
-	require.NotNil(t, cfg)
-
-	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
-	assert.Contains(t, cfg.NextProtos, "h2")
-	assert.Contains(t, cfg.NextProtos, "http/1.1")
-}
-
-func TestNewTLSConfigGetCertificate(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	cfg := ca.NewTLSConfig()
-
-	_, err := cfg.GetCertificate(nil)
-	require.ErrorContains(t, err, "ClientHelloInfo is nil")
-
-	_, err = cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: ""})
-	require.ErrorContains(t, err, "missing server name")
-
-	cert, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
-	require.NoError(t, err)
-	require.NotNil(t, cert)
-	assert.Contains(t, cert.Leaf.DNSNames, "example.com")
-}
-
-func TestNewTLSConfigWithHostFallback(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	cfg := ca.NewTLSConfigWithHost("default.example.com")
-	require.NotNil(t, cfg)
-
-	// A nil ClientHelloInfo is rejected rather than panicking.
-	_, err := cfg.GetCertificate(nil)
-	require.ErrorContains(t, err, "ClientHelloInfo is nil")
-
-	// Empty SNI falls back to the configured host.
-	cert, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: ""})
-	require.NoError(t, err)
-	assert.Contains(t, cert.Leaf.DNSNames, "default.example.com")
-
-	// Provided SNI takes precedence.
-	cert, err = cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "explicit.example.com"})
-	require.NoError(t, err)
-	assert.Contains(t, cert.Leaf.DNSNames, "explicit.example.com")
-}
-
-func TestTLSConfigNilCA(t *testing.T) {
-	t.Parallel()
-
-	var nilCA *CertificateAuthority
-
-	assert.Nil(t, nilCA.NewTLSConfig())
-	assert.Nil(t, nilCA.NewTLSConfigWithHost("example.com"))
-}
-
-func TestGetTLSCertificateCacheHit(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	first, err := ca.getTLSCertificate("example.com")
-	require.NoError(t, err)
-
-	second, err := ca.getTLSCertificate("example.com")
-	require.NoError(t, err)
-
-	assert.Same(t, first, second)
-}
-
-// TestGetTLSCertificateRegeneratesAfterExpiry guards the regression where an expired cache
-// entry caused getTLSCertificate to return (nil, nil), breaking the TLS handshake.
-func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	first, err := ca.getTLSCertificate("example.com")
-	require.NoError(t, err)
-	require.NotNil(t, first)
-	require.NotNil(t, first.Leaf)
-
-	ca.cacheMutex.Lock()
-	ca.cache["example.com"].createdAt = time.Now().Add(-2 * ca.cacheMaxAge)
-	ca.cacheMutex.Unlock()
-
-	second, err := ca.getTLSCertificate("example.com")
-	require.NoError(t, err)
-	require.NotNil(t, second, "expired cache entry was not regenerated")
-	require.NotNil(t, second.Leaf)
-
-	assert.NotEqual(t, first.Leaf.SerialNumber, second.Leaf.SerialNumber)
-}
-
-func TestGetTLSCertificateEvictsToMaxSize(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256, CertificateAuthorityWithCacheMaxSize(2))
-
-	for _, host := range []string{"a.example.com", "b.example.com", "c.example.com"} {
-		_, err := ca.getTLSCertificate(host)
-		require.NoError(t, err)
-	}
-
-	ca.cacheMutex.RLock()
-	size := len(ca.cache)
-	ca.cacheMutex.RUnlock()
-
-	assert.LessOrEqual(t, size, 2)
-}
-
-func TestGetTLSCertificateNormalizesHostPort(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	withoutPort, err := ca.getTLSCertificate("example.com")
-	require.NoError(t, err)
-
-	withPort, err := ca.getTLSCertificate("example.com:8443")
-	require.NoError(t, err)
-
-	// Both forms normalize to the same cache key, so the cached certificate is reused.
-	assert.Same(t, withoutPort, withPort)
-}
-
-// TestTLSServerHandshake exercises the full SNI-driven path end to end: a real TLS server
-// using the dynamic config, and a client that trusts only the CA.
-func TestTLSServerHandshake(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	server.TLS = ca.NewTLSConfig()
-	server.StartTLS()
-
-	defer server.Close()
-
-	roots := x509.NewCertPool()
-	roots.AddCert(ca.CACertificate())
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    roots,
-				ServerName: "example.com",
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-	}
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
-	require.NoError(t, err)
-
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-}
-
-func TestSignCSRSuccess(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	template := &x509.CertificateRequest{
-		Subject: pkix.Name{
-			CommonName: "test-station",
-		},
-		DNSNames: []string{"test.example.com"},
-	}
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, template, key)
-	require.NoError(t, err)
-
-	csr, err := x509.ParseCertificateRequest(csrBytes)
-	require.NoError(t, err)
-
-	cert, err := ca.SignCSR(csr,
-		TLSCertificatePrivateKeyWithValidFor(1*time.Hour),
-		TLSCertificatePrivateKeyWithExtKeyUsage(x509.ExtKeyUsageClientAuth),
-	)
-	require.NoError(t, err)
-	require.NotNil(t, cert)
-
-	assert.Equal(t, "test-station", cert.Subject.CommonName)
-	assert.Contains(t, cert.DNSNames, "test.example.com")
-	assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
-	assert.Equal(t, ca.CACertificate().Subject, cert.Issuer)
-
-	err = cert.CheckSignatureFrom(ca.CACertificate())
-	require.NoError(t, err)
-}
-
-func TestSignCSRUsesClientAuthDefault(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "default-eku"},
-	}, key)
-	require.NoError(t, err)
-
-	csr, err := x509.ParseCertificateRequest(csrBytes)
-	require.NoError(t, err)
-
-	cert, err := ca.SignCSR(csr, TLSCertificatePrivateKeyWithValidFor(1*time.Hour))
-	require.NoError(t, err)
-
-	assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
-}
-
-func TestSignCSRInvalidSignature(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "tampered"},
-	}, key)
-	require.NoError(t, err)
-
-	csr, err := x509.ParseCertificateRequest(csrBytes)
-	require.NoError(t, err)
-
-	// Tamper with the public key so the signature no longer matches.
-	csr.PublicKey = &otherKey.PublicKey
-
-	_, err = ca.SignCSR(csr)
-	require.ErrorContains(t, err, "verifying CSR signature")
-}
-
-// TestNewRejectsMismatchedPrivateKey guards the regression where New only checked that the
-// private key's *type* matched the certificate's public key, allowing a CA whose key does not
-// correspond to its certificate to mint unverifiable certificates.
-func TestNewRejectsMismatchedPrivateKey(t *testing.T) {
-	t.Parallel()
-
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	otherRSAKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	otherECKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	edPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	_, otherEDKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	cases := []struct {
-		name       string
-		publicKey  crypto.PublicKey
-		privateKey crypto.Signer
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t)
+
+	tests := []struct {
+		name        string
+		ofs         []AuthorityOption
+		errContains string
 	}{
-		{"rsa", &rsaKey.PublicKey, otherRSAKey},
-		{"ecdsa", &ecKey.PublicKey, otherECKey},
-		{"ed25519", edPublicKey, otherEDKey},
+		{"zero cache max age", []AuthorityOption{WithCacheMaxAge(0)}, "cache max age must be positive"},
+		{"negative cache max age", []AuthorityOption{WithCacheMaxAge(-time.Hour)}, "cache max age must be positive"},
+		{"zero cache max size", []AuthorityOption{WithCacheMaxSize(0)}, "cache max size must be positive"},
+		{"negative cache max size", []AuthorityOption{WithCacheMaxSize(-1)}, "cache max size must be positive"},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cert := &x509.Certificate{IsCA: true, KeyUsage: x509.KeyUsageCertSign, PublicKey: tc.publicKey}
-
-			_, err := New(cert, tc.privateKey)
-			require.ErrorContains(t, err, "does not match")
+			ca, err := New(caCertificate, caPrivateKey, tt.ofs...)
+			require.ErrorContains(t, err, tt.errContains)
+			assert.Nil(t, ca)
 		})
 	}
 }
 
-func TestNewTLSConfigNextProtosOption(t *testing.T) {
+func TestNewFromPEM(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestCA(t, KeyTypeECDSAP256)
+	for _, kt := range testKeyTypes {
+		t.Run(kt.name, func(t *testing.T) {
+			t.Parallel()
 
-	cfg := ca.NewTLSConfig(TLSConfigWithNextProtos("acme/1"))
-	assert.Equal(t, []string{"acme/1"}, cfg.NextProtos)
+			certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(kt.keyType))
+			require.NoError(t, err)
 
-	// Calling the option with no protocols disables ALPN.
-	cfg = ca.NewTLSConfig(TLSConfigWithNextProtos())
-	assert.Empty(t, cfg.NextProtos)
+			ca, err := NewFromPEM(certificatePEM, privateKeyPEM)
+			require.NoError(t, err)
+
+			certificateBlock, _ := pem.Decode(certificatePEM)
+			require.NotNil(t, certificateBlock)
+
+			assert.Equal(t, certificateBlock.Bytes, ca.CACertificate().Raw)
+		})
+	}
+
+	t.Run("pkcs8 wrapped RSA private key", func(t *testing.T) {
+		t.Parallel()
+
+		caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
+
+		certificatePEM, err := CertificateToPEM(caCertificate)
+		require.NoError(t, err)
+
+		pkcs8DER, err := x509.MarshalPKCS8PrivateKey(caPrivateKey)
+		require.NoError(t, err)
+
+		privateKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8DER})
+
+		ca, err := NewFromPEM(certificatePEM, privateKeyPEM)
+		require.NoError(t, err)
+
+		assert.Equal(t, caCertificate.Raw, ca.CACertificate().Raw)
+	})
+
+	t.Run("authority options forwarded", func(t *testing.T) {
+		t.Parallel()
+
+		certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeED25519))
+		require.NoError(t, err)
+
+		ca, err := NewFromPEM(certificatePEM, privateKeyPEM, WithCacheMaxSize(3), WithCacheMaxAge(2*time.Minute))
+		require.NoError(t, err)
+
+		assert.Equal(t, 3, ca.cacheMaxSize)
+		assert.Equal(t, 2*time.Minute, ca.cacheMaxAge)
+	})
 }
 
-func TestGenerateTLSCertificateClampsValidityToCAExpiry(t *testing.T) {
+func TestNewFromPEMValidation(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	cert, _, err := ca.GenerateTLSCertificate(
-		[]string{"example.com"},
-		TLSCertificatePrivateKeyWithValidFor(100*365*24*time.Hour),
-	)
+	certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeED25519))
 	require.NoError(t, err)
 
-	assert.True(t, cert.NotAfter.Equal(ca.CACertificate().NotAfter))
+	_, otherPrivateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Other CA"), WithCAKeyType(KeyTypeED25519))
+	require.NoError(t, err)
+
+	garbageCertificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
+	unsupportedKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: []byte("not a private key")})
+
+	tests := []struct {
+		name           string
+		certificatePEM []byte
+		privateKeyPEM  []byte
+		errContains    string
+	}{
+		{"empty certificate bytes", nil, privateKeyPEM, "CA certificate bytes are empty"},
+		{"empty private key bytes", certificatePEM, nil, "CA private key bytes are empty"},
+		{"malformed certificate PEM", []byte("not pem"), privateKeyPEM, "decoding PEM block for CA certificate"},
+		{"wrong certificate block type", privateKeyPEM, privateKeyPEM, "invalid PEM block type for CA certificate"},
+		{"unparseable certificate DER", garbageCertificatePEM, privateKeyPEM, "parsing X.509 certificate from PEM data"},
+		{"malformed private key PEM", certificatePEM, []byte("not pem"), "decoding PEM block for private key"},
+		{"unsupported private key block type", certificatePEM, unsupportedKeyPEM, "unsupported PEM block type for private key"},
+		{"mismatched certificate and key", certificatePEM, otherPrivateKeyPEM, "does not match the certificate's public key"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ca, err := NewFromPEM(tt.certificatePEM, tt.privateKeyPEM)
+			require.ErrorContains(t, err, tt.errContains)
+			assert.Nil(t, ca)
+		})
+	}
 }
 
-func TestSignCSRClampsValidityToCAExpiry(t *testing.T) {
+func TestCACertificateReturnsCopy(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestCA(t, KeyTypeECDSAP256)
+	t.Run("nil authority returns nil", func(t *testing.T) {
+		t.Parallel()
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
+		var ca *CertificateAuthority
 
-	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "clamped"},
-	}, key)
-	require.NoError(t, err)
+		assert.Nil(t, ca.CACertificate())
+		assert.Nil(t, ca.CACertificatePrivateKey())
+	})
 
-	csr, err := x509.ParseCertificateRequest(csrBytes)
-	require.NoError(t, err)
+	t.Run("uninitialized authority returns nil", func(t *testing.T) {
+		t.Parallel()
 
-	cert, err := ca.SignCSR(csr, TLSCertificatePrivateKeyWithValidFor(100*365*24*time.Hour))
-	require.NoError(t, err)
+		ca := &CertificateAuthority{}
 
-	assert.True(t, cert.NotAfter.Equal(ca.CACertificate().NotAfter))
+		assert.Nil(t, ca.CACertificate())
+		assert.Nil(t, ca.CACertificatePrivateKey())
+	})
+
+	t.Run("mutating the returned certificate does not affect the authority", func(t *testing.T) {
+		t.Parallel()
+
+		ca := newTestAuthority(t)
+
+		certificate := ca.CACertificate()
+		require.NotNil(t, certificate)
+
+		originalNotAfter := certificate.NotAfter
+		certificate.NotAfter = time.Now().Add(-time.Hour)
+
+		refetched := ca.CACertificate()
+		require.NotNil(t, refetched)
+
+		assert.True(t, refetched.NotAfter.Equal(originalNotAfter))
+	})
 }
 
-func TestGenerateTLSCertificateDefaultCommonNameUsesFirstHost(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestCA(t, KeyTypeECDSAP256)
-
-	cert, _, err := ca.GenerateTLSCertificate([]string{"first.example.com", "second.example.com"})
-	require.NoError(t, err)
-
-	assert.Equal(t, "first.example.com", cert.Subject.CommonName)
-}
-
-// TestZeroValueCertificateAuthority verifies that the documented-unusable zero value fails
-// with a clear error instead of panicking inside x509.CreateCertificate.
 func TestZeroValueCertificateAuthority(t *testing.T) {
 	t.Parallel()
 
 	ca := &CertificateAuthority{}
 
 	_, _, err := ca.GenerateTLSCertificate([]string{"example.com"})
-	require.ErrorContains(t, err, "not initialized")
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
 
-	_, err = ca.SignCSR(&x509.CertificateRequest{})
-	require.ErrorContains(t, err, "not initialized")
+	_, err = ca.SignCSR(newTestCSR(t, "client.example.com", nil))
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
 
-	_, err = ca.getTLSCertificate("example.com")
-	require.ErrorContains(t, err, "not initialized")
+	_, err = ca.TLSCertificate("example.com")
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
+
+	assert.Nil(t, ca.CACertificate())
+	assert.Nil(t, ca.CACertificatePrivateKey())
+
+	config := ca.NewTLSConfig()
+	require.NotNil(t, config)
+
+	_, err = config.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
+
+	configWithHost := ca.NewTLSConfigWithHost("fallback.example.com")
+	require.NotNil(t, configWithHost)
+
+	_, err = configWithHost.GetCertificate(&tls.ClientHelloInfo{})
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
 }
 
-// TestGetTLSCertificateRegeneratesWhenLeafExpired covers the case where the cached certificate
-// itself has expired even though the cache entry is younger than cacheMaxAge.
-func TestGetTLSCertificateRegeneratesWhenLeafExpired(t *testing.T) {
+func TestTLSCertificateValidation(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestCA(t, KeyTypeECDSAP256)
+	var nilAuthority *CertificateAuthority
 
-	first, err := ca.getTLSCertificate("example.com")
+	_, err := nilAuthority.TLSCertificate("example.com")
+	require.ErrorContains(t, err, "CertificateAuthority is nil")
+
+	zeroAuthority := &CertificateAuthority{}
+
+	_, err = zeroAuthority.TLSCertificate("example.com")
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
+}
+
+func TestTLSCertificateSuccess(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	certificate, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
+	require.NotNil(t, certificate)
+	require.NotNil(t, certificate.Leaf)
+
+	require.Len(t, certificate.Certificate, 2)
+	assert.Equal(t, certificate.Leaf.Raw, certificate.Certificate[0])
+	assert.Equal(t, ca.CACertificate().Raw, certificate.Certificate[1])
+	assert.Contains(t, certificate.Leaf.DNSNames, "example.com")
+
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.CACertificate())
+
+	_, err = certificate.Leaf.Verify(x509.VerifyOptions{DNSName: "example.com", Roots: roots})
+	require.NoError(t, err)
+}
+
+func TestTLSCertificateCacheHit(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	first, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
 
-	// Simulate a cached certificate that has itself expired, without aging the entry.
+	second, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
+
+	assert.Same(t, first, second)
+}
+
+func TestTLSCertificateNormalizesHostname(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	first, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
+
+	second, err := ca.TLSCertificate("EXAMPLE.com:443")
+	require.NoError(t, err)
+
+	assert.Same(t, first, second)
+}
+
+func TestTLSCertificateConcurrentSameHost(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
+
+	ca, err := New(caCertificate, caPrivateKey)
+	require.NoError(t, err)
+
+	const goroutines = 16
+
+	type callResult struct {
+		certificate *tls.Certificate
+		err         error
+	}
+
+	results := make(chan callResult, goroutines)
+
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+
+			certificate, err := ca.TLSCertificate("concurrent.example.com")
+			results <- callResult{certificate: certificate, err: err}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var first *tls.Certificate
+
+	for result := range results {
+		require.NoError(t, result.err)
+		require.NotNil(t, result.certificate)
+
+		if first == nil {
+			first = result.certificate
+		} else {
+			assert.Same(t, first, result.certificate)
+		}
+	}
+
+	ca.cacheMutex.RLock()
+	defer ca.cacheMutex.RUnlock()
+
+	assert.Len(t, ca.cache, 1)
+}
+
+func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t, WithCacheMaxAge(time.Minute))
+
+	first, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
+
+	ca.cacheMutex.RLock()
+	entry, exists := ca.cache["example.com"]
+	ca.cacheMutex.RUnlock()
+	require.True(t, exists)
+
+	// Backdate the cache entry so it is older than the configured maximum age.
 	ca.cacheMutex.Lock()
-
-	entry := ca.cache["example.com"]
-	expired := *entry.certificate
-	expiredLeaf := *entry.certificate.Leaf
-	expiredLeaf.NotAfter = time.Now().Add(-time.Minute)
-	expired.Leaf = &expiredLeaf
-	entry.certificate = &expired
-
+	entry.createdAt = time.Now().Add(-2 * time.Minute)
 	ca.cacheMutex.Unlock()
 
-	second, err := ca.getTLSCertificate("example.com")
+	second, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
 
 	assert.NotSame(t, first, second)
 }
 
-// TestGetTLSCertificateConcurrentSameHost hammers the single-host generation path: under the
-// in-flight deduplication, every goroutine must converge on one shared certificate.
-func TestGetTLSCertificateConcurrentSameHost(t *testing.T) {
+func TestGetTLSCertificateRegeneratesWhenLeafExpired(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestCA(t, KeyTypeECDSAP256)
+	ca := newTestAuthority(t)
 
-	const goroutines = 32
+	first, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-	var wg sync.WaitGroup
+	ca.cacheMutex.RLock()
+	entry, exists := ca.cache["example.com"]
+	ca.cacheMutex.RUnlock()
+	require.True(t, exists)
 
-	certificates := make([]*tls.Certificate, goroutines)
-	errs := make([]error, goroutines)
+	// Expire the cached leaf so the entry is no longer servable.
+	ca.cacheMutex.Lock()
+	entry.certificate.Leaf.NotAfter = time.Now().Add(-time.Hour)
+	ca.cacheMutex.Unlock()
 
-	for i := range goroutines {
-		wg.Add(1)
+	second, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-		go func() {
-			defer wg.Done()
+	assert.NotSame(t, first, second)
+}
 
-			certificates[i], errs[i] = ca.getTLSCertificate("concurrent.example.com")
-		}()
-	}
+func TestGetTLSCertificateEvictsToMaxSize(t *testing.T) {
+	t.Parallel()
 
-	wg.Wait()
+	ca := newTestAuthority(t, WithCacheMaxSize(2))
 
-	for i := range goroutines {
-		require.NoError(t, errs[i])
-		assert.Same(t, certificates[0], certificates[i])
+	_, err := ca.TLSCertificate("a.example.com")
+	require.NoError(t, err)
+
+	_, err = ca.TLSCertificate("b.example.com")
+	require.NoError(t, err)
+
+	_, err = ca.TLSCertificate("c.example.com")
+	require.NoError(t, err)
+
+	ca.cacheMutex.RLock()
+	defer ca.cacheMutex.RUnlock()
+
+	assert.Len(t, ca.cache, 2)
+	assert.NotContains(t, ca.cache, "a.example.com")
+	assert.Contains(t, ca.cache, "b.example.com")
+	assert.Contains(t, ca.cache, "c.example.com")
+}
+
+func TestNewTLSConfigDefaults(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	config := ca.NewTLSConfig()
+	require.NotNil(t, config)
+
+	assert.Equal(t, uint16(tls.VersionTLS12), config.MinVersion)
+	assert.Equal(t, []string{"h2", "http/1.1"}, config.NextProtos)
+	require.NotNil(t, config.GetCertificate)
+
+	_, err := config.GetCertificate(nil)
+	require.ErrorContains(t, err, "ClientHelloInfo is nil")
+
+	_, err = config.GetCertificate(&tls.ClientHelloInfo{})
+	require.ErrorContains(t, err, "missing server name (SNI)")
+
+	certificate, err := config.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
+	require.NoError(t, err)
+	require.NotNil(t, certificate.Leaf)
+
+	assert.Contains(t, certificate.Leaf.DNSNames, "example.com")
+}
+
+func TestNewTLSConfigNextProtosOption(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	config := ca.NewTLSConfig(WithNextProtos("acme/1", "acme/2"))
+	require.NotNil(t, config)
+	assert.Equal(t, []string{"acme/1", "acme/2"}, config.NextProtos)
+
+	configNoALPN := ca.NewTLSConfig(WithNextProtos())
+	require.NotNil(t, configNoALPN)
+	assert.Empty(t, configNoALPN.NextProtos)
+}
+
+func TestNewTLSConfigWithHostFallback(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	config := ca.NewTLSConfigWithHost("fallback.example.com")
+	require.NotNil(t, config)
+
+	certificate, err := config.GetCertificate(&tls.ClientHelloInfo{})
+	require.NoError(t, err)
+	require.NotNil(t, certificate.Leaf)
+
+	assert.Contains(t, certificate.Leaf.DNSNames, "fallback.example.com")
+
+	certificate, err = config.GetCertificate(&tls.ClientHelloInfo{ServerName: "other.example.com"})
+	require.NoError(t, err)
+	require.NotNil(t, certificate.Leaf)
+
+	assert.Contains(t, certificate.Leaf.DNSNames, "other.example.com")
+}
+
+func TestTLSConfigNilCA(t *testing.T) {
+	t.Parallel()
+
+	var ca *CertificateAuthority
+
+	config := ca.NewTLSConfig()
+	require.NotNil(t, config)
+
+	_, err := config.GetCertificate(&tls.ClientHelloInfo{ServerName: "example.com"})
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
+
+	configWithHost := ca.NewTLSConfigWithHost("fallback.example.com")
+	require.NotNil(t, configWithHost)
+
+	_, err = configWithHost.GetCertificate(&tls.ClientHelloInfo{})
+	require.ErrorContains(t, err, "CertificateAuthority is not initialized")
+}
+
+func TestTLSServerHandshake(t *testing.T) {
+	t.Parallel()
+
+	for _, kt := range testKeyTypes {
+		t.Run(kt.name, func(t *testing.T) {
+			t.Parallel()
+
+			caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(kt.keyType))
+
+			ca, err := New(caCertificate, caPrivateKey)
+			require.NoError(t, err)
+
+			roots := x509.NewCertPool()
+			roots.AddCert(caCertificate)
+
+			t.Run("trusted CA", func(t *testing.T) {
+				t.Parallel()
+
+				clientConfig := &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					RootCAs:    roots,
+					ServerName: "example.com",
+					NextProtos: []string{"h2"},
+				}
+
+				clientState, serverErr, clientErr := handshakeOverPipe(t, ca.NewTLSConfig(), clientConfig)
+				require.NoError(t, clientErr)
+				require.NoError(t, serverErr)
+
+				assert.Equal(t, "h2", clientState.NegotiatedProtocol)
+				require.NotEmpty(t, clientState.PeerCertificates)
+				assert.Contains(t, clientState.PeerCertificates[0].DNSNames, "example.com")
+				assert.NotEmpty(t, clientState.VerifiedChains)
+			})
+
+			t.Run("untrusted CA", func(t *testing.T) {
+				t.Parallel()
+
+				clientConfig := &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					RootCAs:    x509.NewCertPool(),
+					ServerName: "example.com",
+				}
+
+				_, serverErr, clientErr := handshakeOverPipe(t, ca.NewTLSConfig(), clientConfig)
+				require.Error(t, clientErr)
+				require.Error(t, serverErr)
+			})
+		})
 	}
 }
 
-func BenchmarkGetTLSCertificateCacheHit(b *testing.B) {
-	cert, key, err := GenerateCACertificatePrivateKey(CACertificatePrivateKeyWithKeyType(KeyTypeECDSAP256))
-	require.NoError(b, err)
+func TestTLSServerHandshakeWithHostFallback(t *testing.T) {
+	t.Parallel()
 
-	ca, err := New(cert, key)
-	require.NoError(b, err)
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
 
-	_, err = ca.getTLSCertificate("bench.example.com")
-	require.NoError(b, err)
+	ca, err := New(caCertificate, caPrivateKey)
+	require.NoError(t, err)
 
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for b.Loop() {
-		_, err = ca.getTLSCertificate("bench.example.com")
-		if err != nil {
-			b.Fatal(err)
-		}
+	serverConfig := ca.NewTLSConfigWithHost("fallback.example.com")
+	clientConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, // exercised to reach the handshake without SNI
 	}
+
+	clientState, serverErr, clientErr := handshakeOverPipe(t, serverConfig, clientConfig)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+
+	require.NotEmpty(t, clientState.PeerCertificates)
+	assert.Contains(t, clientState.PeerCertificates[0].DNSNames, "fallback.example.com")
+}
+
+func TestGenerateCACertificatePrivateKeyDefaults(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := GenerateCACertificatePrivateKey()
+	require.ErrorContains(t, err, "CommonName is empty")
+
+	before := time.Now()
+
+	certificate, privateKey, err := GenerateCACertificatePrivateKey(WithCACommonName("Test CA"))
+	require.NoError(t, err)
+	require.NotNil(t, certificate)
+	require.NotNil(t, privateKey)
+
+	assert.IsType(t, &rsa.PrivateKey{}, privateKey)
+	assert.True(t, certificate.IsCA)
+	assert.True(t, certificate.BasicConstraintsValid)
+	assert.Equal(t, x509.KeyUsageCertSign|x509.KeyUsageCRLSign, certificate.KeyUsage)
+	assert.Empty(t, certificate.Subject.Organization)
+	assert.GreaterOrEqual(t, certificate.SerialNumber.Sign(), 0)
+	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
+	assert.Len(t, certificate.SubjectKeyId, 32)
+
+	// NotBefore is backdated by 5 minutes from the generation time to tolerate
+	// clock skew, and NotAfter is exactly ValidFrom + 365 days.
+	assert.WithinDuration(t, before.Add(-5*time.Minute), certificate.NotBefore, time.Minute)
+	assert.True(t, certificate.NotAfter.Equal(certificate.NotBefore.Add(365*24*time.Hour+5*time.Minute)))
+
+	require.NoError(t, certificate.CheckSignatureFrom(certificate))
+}
+
+func TestGenerateCACertificatePrivateKeyKeyTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		keyType           KeyType
+		wantPrivateKey    any
+		wantSignatureAlgo x509.SignatureAlgorithm
+	}{
+		{"rsa", KeyTypeRSA2048, &rsa.PrivateKey{}, x509.SHA256WithRSA},
+		{"ecdsa", KeyTypeECDSAP256, &ecdsa.PrivateKey{}, x509.ECDSAWithSHA256},
+		{"ed25519", KeyTypeED25519, ed25519.PrivateKey{}, x509.PureEd25519},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			certificate, privateKey, err := GenerateCACertificatePrivateKey(WithCACommonName("Test CA"), WithCAKeyType(tt.keyType))
+			require.NoError(t, err)
+
+			assert.IsType(t, tt.wantPrivateKey, privateKey)
+			assert.Equal(t, tt.wantSignatureAlgo, certificate.SignatureAlgorithm)
+
+			requirePublicKeysEqual(t, privateKey.Public(), certificate.PublicKey)
+			require.NoError(t, certificate.CheckSignatureFrom(certificate))
+		})
+	}
+}
+
+func TestGenerateCACertificatePrivateKeyCustomOptions(t *testing.T) {
+	t.Parallel()
+
+	validFrom := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	validFor := 72 * time.Hour
+
+	certificate, _, err := GenerateCACertificatePrivateKey(
+		WithCACommonName("Custom CA"),
+		WithCAOrganization([]string{"Custom Org"}),
+		WithCAValidFrom(validFrom),
+		WithCAValidFor(validFor),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Custom CA", certificate.Subject.CommonName)
+	assert.Equal(t, []string{"Custom Org"}, certificate.Subject.Organization)
+	assert.True(t, certificate.NotBefore.Equal(validFrom.Add(-5*time.Minute)))
+	assert.True(t, certificate.NotAfter.Equal(validFrom.Add(validFor)))
+}
+
+func TestGenerateCACertificatePrivateKeyValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		ofs         []CAOption
+		errContains string
+	}{
+		{"missing common name", nil, "CommonName is empty"},
+		{"empty common name", []CAOption{WithCACommonName("")}, "CommonName is empty"},
+		{"zero validity duration", []CAOption{WithCACommonName("Test CA"), WithCAValidFor(0)}, "ValidFor duration must be positive"},
+		{"negative validity duration", []CAOption{WithCACommonName("Test CA"), WithCAValidFor(-time.Hour)}, "ValidFor duration must be positive"},
+		{"unsupported key type", []CAOption{WithCACommonName("Test CA"), WithCAKeyType(KeyType(99))}, "unsupported CA key type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := GenerateCACertificatePrivateKey(tt.ofs...)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestGenerateTLSCertificateValidation(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	tests := []struct {
+		name        string
+		ca          *CertificateAuthority
+		hosts       []string
+		ofs         []TLSOption
+		errContains string
+	}{
+		{"nil authority", nil, []string{"example.com"}, nil, "CertificateAuthority is nil"},
+		{"uninitialized authority", &CertificateAuthority{}, []string{"example.com"}, nil, "CertificateAuthority is not initialized"},
+		{"empty hosts list", ca, nil, nil, "hosts list is empty"},
+		{"empty hostname in hosts list", ca, []string{""}, nil, "empty hostname in hosts list"},
+		{"empty common name", ca, []string{"example.com"}, []TLSOption{WithTLSCommonName("")}, "CommonName is empty"},
+		{"non-positive validity duration", ca, []string{"example.com"}, []TLSOption{WithTLSValidFor(0)}, "ValidFor duration must be positive"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := tt.ca.GenerateTLSCertificate(tt.hosts, tt.ofs...)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestGenerateTLSCertificateSuccess(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	before := time.Now()
+
+	certificate, privateKey, err := ca.GenerateTLSCertificate([]string{"example.com"})
+	require.NoError(t, err)
+	require.NotNil(t, certificate)
+	require.NotNil(t, privateKey)
+
+	assert.Equal(t, "example.com", certificate.Subject.CommonName)
+	assert.Empty(t, certificate.Subject.Organization)
+	assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, certificate.ExtKeyUsage)
+	assert.Equal(t, x509.KeyUsageKeyEncipherment|x509.KeyUsageDigitalSignature, certificate.KeyUsage)
+	assert.GreaterOrEqual(t, certificate.SerialNumber.Sign(), 0)
+	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
+	assert.Len(t, certificate.SubjectKeyId, 32)
+
+	// NotBefore is backdated by 5 minutes from the generation time. The leaf
+	// asks for 365 days starting now, which outlives the CA's remaining
+	// lifetime, so NotAfter is clamped to the CA's expiry (~365 days out).
+	assert.WithinDuration(t, before.Add(-5*time.Minute), certificate.NotBefore, time.Minute)
+
+	caCertificate := ca.CACertificate()
+	require.NotNil(t, caCertificate)
+
+	assert.True(t, certificate.NotAfter.Equal(caCertificate.NotAfter))
+	assert.WithinDuration(t, time.Now().Add(365*24*time.Hour), certificate.NotAfter, time.Minute)
+
+	require.NoError(t, certificate.CheckSignatureFrom(caCertificate))
+
+	roots := x509.NewCertPool()
+	roots.AddCert(caCertificate)
+
+	_, err = certificate.Verify(x509.VerifyOptions{DNSName: "example.com", Roots: roots})
+	require.NoError(t, err)
+
+	_, err = certificate.Verify(x509.VerifyOptions{DNSName: "wrong.example.com", Roots: roots})
+	require.Error(t, err)
+}
+
+func TestGenerateTLSCertificateLeafKeyMatchesCAKeyType(t *testing.T) {
+	t.Parallel()
+
+	for _, kt := range testKeyTypes {
+		t.Run(kt.name, func(t *testing.T) {
+			t.Parallel()
+
+			caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(kt.keyType))
+
+			ca, err := New(caCertificate, caPrivateKey)
+			require.NoError(t, err)
+
+			certificate, privateKey, err := ca.GenerateTLSCertificate([]string{"example.com"})
+			require.NoError(t, err)
+
+			switch kt.keyType {
+			case KeyTypeRSA2048:
+				assert.IsType(t, &rsa.PrivateKey{}, privateKey)
+			case KeyTypeECDSAP256:
+				leafKey, ok := privateKey.(*ecdsa.PrivateKey)
+				require.True(t, ok)
+
+				caKey, ok := caPrivateKey.(*ecdsa.PrivateKey)
+				require.True(t, ok)
+
+				assert.Equal(t, caKey.Curve.Params().Name, leafKey.Curve.Params().Name)
+			case KeyTypeED25519:
+				assert.IsType(t, ed25519.PrivateKey{}, privateKey)
+			default:
+				require.FailNow(t, "unhandled key type in test")
+			}
+
+			requirePublicKeysEqual(t, privateKey.Public(), certificate.PublicKey)
+		})
+	}
+}
+
+func TestGenerateTLSCertificateHostClassification(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	tests := []struct {
+		name       string
+		hosts      []string
+		dnsNames   []string
+		ipStrings  []string
+		emails     []string
+		uriStrings []string
+	}{
+		{"ipv4 address", []string{"192.0.2.1"}, nil, []string{"192.0.2.1"}, nil, nil},
+		{"ipv6 address", []string{"2001:db8::1"}, nil, []string{"2001:db8::1"}, nil, nil},
+		{"email address", []string{"user@example.com"}, nil, nil, []string{"user@example.com"}, nil},
+		{"uri with scheme and host", []string{"https://example.com/path"}, nil, nil, nil, []string{"https://example.com/path"}},
+		{"plain dns name", []string{"example.com"}, []string{"example.com"}, nil, nil, nil},
+		{"wildcard dns name", []string{"*.example.com"}, []string{"*.example.com"}, nil, nil, nil},
+		{
+			"mixed hosts",
+			[]string{"example.com", "192.0.2.1", "2001:db8::1", "user@example.com", "https://example.com/path"},
+			[]string{"example.com"},
+			[]string{"192.0.2.1", "2001:db8::1"},
+			[]string{"user@example.com"},
+			[]string{"https://example.com/path"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			certificate, _, err := ca.GenerateTLSCertificate(tt.hosts)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.dnsNames, certificate.DNSNames)
+			assert.Equal(t, tt.emails, certificate.EmailAddresses)
+
+			require.Len(t, certificate.IPAddresses, len(tt.ipStrings))
+
+			for i, ip := range certificate.IPAddresses {
+				assert.Equal(t, tt.ipStrings[i], ip.String())
+			}
+
+			require.Len(t, certificate.URIs, len(tt.uriStrings))
+
+			for i, uri := range certificate.URIs {
+				assert.Equal(t, tt.uriStrings[i], uri.String())
+			}
+		})
+	}
+}
+
+func TestGenerateTLSCertificateCustomOptions(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	t.Run("custom subject validity and single extended key usage", func(t *testing.T) {
+		t.Parallel()
+
+		validFrom := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+		validFor := 4 * time.Hour
+
+		certificate, _, err := ca.GenerateTLSCertificate(
+			[]string{"example.com"},
+			WithTLSCommonName("custom.example.com"),
+			WithTLSOrganization([]string{"Custom Org"}),
+			WithTLSValidFrom(validFrom),
+			WithTLSValidFor(validFor),
+			WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
+		)
+		require.NoError(t, err)
+
+		assert.Equal(t, "custom.example.com", certificate.Subject.CommonName)
+		assert.Equal(t, []string{"Custom Org"}, certificate.Subject.Organization)
+		assert.True(t, certificate.NotBefore.Equal(validFrom.Add(-5*time.Minute)))
+		assert.True(t, certificate.NotAfter.Equal(validFrom.Add(validFor)))
+		assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, certificate.ExtKeyUsage)
+	})
+
+	t.Run("multiple extended key usages", func(t *testing.T) {
+		t.Parallel()
+
+		certificate, _, err := ca.GenerateTLSCertificate(
+			[]string{"example.com"},
+			WithTLSExtKeyUsage(x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth),
+		)
+		require.NoError(t, err)
+
+		assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, certificate.ExtKeyUsage)
+	})
+}
+
+func TestGenerateTLSCertificateClampsValidityToCAExpiry(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAValidFor(time.Hour))
+
+	ca, err := New(caCertificate, caPrivateKey)
+	require.NoError(t, err)
+
+	certificate, _, err := ca.GenerateTLSCertificate([]string{"example.com"}, WithTLSValidFor(365*24*time.Hour))
+	require.NoError(t, err)
+
+	assert.True(t, certificate.NotAfter.Equal(caCertificate.NotAfter))
+}
+
+func TestSignCSRValidation(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	validCSR := newTestCSR(t, "client.example.com", []string{"client.example.com"})
+
+	tamperedCSR := newTestCSR(t, "client.example.com", nil)
+	tamperedCSR.Signature[0] ^= 0xFF
+
+	emptyCNCSR := newTestCSR(t, "", nil)
+
+	tests := []struct {
+		name        string
+		ca          *CertificateAuthority
+		csr         *x509.CertificateRequest
+		ofs         []TLSOption
+		errContains string
+	}{
+		{"nil authority", nil, validCSR, nil, "CertificateAuthority is nil"},
+		{"uninitialized authority", &CertificateAuthority{}, validCSR, nil, "CertificateAuthority is not initialized"},
+		{"nil CSR", ca, nil, nil, "CSR is nil"},
+		{"tampered CSR signature", ca, tamperedCSR, nil, "verifying CSR signature"},
+		{"empty common name", ca, emptyCNCSR, nil, "CommonName is empty"},
+		{"non-positive validity duration", ca, validCSR, []TLSOption{WithTLSValidFor(0)}, "ValidFor duration must be positive"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := tt.ca.SignCSR(tt.csr, tt.ofs...)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestSignCSRSuccess(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	uri, err := url.Parse("https://client.example.com/path")
+	require.NoError(t, err)
+
+	template := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName:   "client.example.com",
+			Organization: []string{"Test Org"},
+		},
+		DNSNames:       []string{"client.example.com", "www.client.example.com"},
+		IPAddresses:    []net.IP{net.ParseIP("192.0.2.10")},
+		EmailAddresses: []string{"client@example.com"},
+		URIs:           []*url.URL{uri},
+	}
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, privateKey)
+	require.NoError(t, err)
+
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	require.NoError(t, err)
+
+	certificate, err := ca.SignCSR(csr)
+	require.NoError(t, err)
+
+	assert.Equal(t, "client.example.com", certificate.Subject.CommonName)
+	assert.Equal(t, []string{"Test Org"}, certificate.Subject.Organization)
+	assert.Equal(t, []string{"client.example.com", "www.client.example.com"}, certificate.DNSNames)
+	assert.Equal(t, []string{"client@example.com"}, certificate.EmailAddresses)
+	require.Len(t, certificate.IPAddresses, 1)
+	assert.Equal(t, "192.0.2.10", certificate.IPAddresses[0].String())
+	require.Len(t, certificate.URIs, 1)
+	assert.Equal(t, "https://client.example.com/path", certificate.URIs[0].String())
+	assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, certificate.ExtKeyUsage)
+	assert.Equal(t, x509.KeyUsageKeyEncipherment|x509.KeyUsageDigitalSignature, certificate.KeyUsage)
+
+	// The SKI is the SHA-256 of the CSR public key's PKIX encoding.
+	expectedSKI, err := generateSubjectKeyID(csr.PublicKey)
+	require.NoError(t, err)
+
+	assert.Equal(t, expectedSKI, certificate.SubjectKeyId)
+
+	caCertificate := ca.CACertificate()
+	require.NotNil(t, caCertificate)
+	require.NoError(t, certificate.CheckSignatureFrom(caCertificate))
+
+	roots := x509.NewCertPool()
+	roots.AddCert(caCertificate)
+
+	_, err = certificate.Verify(x509.VerifyOptions{
+		DNSName:   "client.example.com",
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	require.NoError(t, err)
+}
+
+func TestSignCSRSubjectOverrides(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	csr := newTestCSR(t, "client.example.com", []string{"client.example.com"})
+
+	certificate, err := ca.SignCSR(csr,
+		WithTLSCommonName("override.example.com"),
+		WithTLSOrganization([]string{"Override Org"}),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "override.example.com", certificate.Subject.CommonName)
+	assert.Equal(t, []string{"Override Org"}, certificate.Subject.Organization)
+}
+
+func TestSignCSRClampsValidityToCAExpiry(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAValidFor(time.Hour))
+
+	ca, err := New(caCertificate, caPrivateKey)
+	require.NoError(t, err)
+
+	csr := newTestCSR(t, "client.example.com", nil)
+
+	certificate, err := ca.SignCSR(csr)
+	require.NoError(t, err)
+
+	assert.True(t, certificate.NotAfter.Equal(caCertificate.NotAfter))
+}
+
+// fakeSigner is a crypto.Signer whose key type is none of RSA, ECDSA, or
+// Ed25519, used to exercise the unsupported key type error paths.
+type fakeSigner struct{}
+
+func (fakeSigner) Public() crypto.PublicKey {
+	return nil
+}
+
+func (fakeSigner) Sign(_ io.Reader, _ []byte, _ crypto.SignerOpts) ([]byte, error) {
+	return nil, errors.New("fakeSigner does not sign")
+}
+
+func TestCertificateToPEM(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, _ := newTestCACertificatePrivateKey(t)
+
+	raw, err := CertificateToPEM(caCertificate)
+	require.NoError(t, err)
+
+	block, _ := pem.Decode(raw)
+	require.NotNil(t, block)
+	assert.Equal(t, "CERTIFICATE", block.Type)
+
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+
+	assert.Equal(t, caCertificate.Raw, parsed.Raw)
+
+	tests := []struct {
+		name        string
+		certificate *x509.Certificate
+		errContains string
+	}{
+		{"nil certificate", nil, "certificate is nil"},
+		{"empty raw data", &x509.Certificate{}, "certificate raw data is empty"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := CertificateToPEM(tt.certificate)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestPrivateKeyToPEMBlockTypes(t *testing.T) {
+	t.Parallel()
+
+	rsaPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	ecdsaPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	_, ed25519PrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		privateKey    crypto.Signer
+		wantBlockType string
+	}{
+		{"rsa", rsaPrivateKey, "RSA PRIVATE KEY"},
+		{"ecdsa", ecdsaPrivateKey, "EC PRIVATE KEY"},
+		{"ed25519", ed25519PrivateKey, "PRIVATE KEY"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := PrivateKeyToPEM(tt.privateKey)
+			require.NoError(t, err)
+
+			block, _ := pem.Decode(raw)
+			require.NotNil(t, block)
+			assert.Equal(t, tt.wantBlockType, block.Type)
+		})
+	}
+}
+
+func TestPrivateKeyToPEMRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	rsaPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	ecdsaPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	_, ed25519PrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		privateKey crypto.Signer
+		parse      func(t *testing.T, der []byte) crypto.Signer
+		equal      func(t *testing.T, expected, actual crypto.Signer)
+	}{
+		{
+			name:       "rsa",
+			privateKey: rsaPrivateKey,
+			parse: func(t *testing.T, der []byte) crypto.Signer {
+				t.Helper()
+
+				key, err := x509.ParsePKCS1PrivateKey(der)
+				require.NoError(t, err)
+
+				return key
+			},
+			equal: func(t *testing.T, expected, actual crypto.Signer) {
+				t.Helper()
+
+				expectedKey, ok := expected.(*rsa.PrivateKey)
+				require.True(t, ok)
+
+				actualKey, ok := actual.(*rsa.PrivateKey)
+				require.True(t, ok)
+
+				assert.Zero(t, expectedKey.D.Cmp(actualKey.D))
+				assert.Zero(t, expectedKey.N.Cmp(actualKey.N))
+				assert.Equal(t, expectedKey.E, actualKey.E)
+				requirePublicKeysEqual(t, expectedKey.Public(), actualKey.Public())
+			},
+		},
+		{
+			name:       "ecdsa",
+			privateKey: ecdsaPrivateKey,
+			parse: func(t *testing.T, der []byte) crypto.Signer {
+				t.Helper()
+
+				key, err := x509.ParseECPrivateKey(der)
+				require.NoError(t, err)
+
+				return key
+			},
+			equal: func(t *testing.T, expected, actual crypto.Signer) {
+				t.Helper()
+
+				expectedKey, ok := expected.(*ecdsa.PrivateKey)
+				require.True(t, ok)
+
+				actualKey, ok := actual.(*ecdsa.PrivateKey)
+				require.True(t, ok)
+
+				expectedBytes, err := expectedKey.Bytes()
+				require.NoError(t, err)
+
+				actualBytes, err := actualKey.Bytes()
+				require.NoError(t, err)
+
+				assert.Equal(t, expectedBytes, actualBytes)
+				requirePublicKeysEqual(t, expectedKey.Public(), actualKey.Public())
+			},
+		},
+		{
+			name:       "ed25519",
+			privateKey: ed25519PrivateKey,
+			parse: func(t *testing.T, der []byte) crypto.Signer {
+				t.Helper()
+
+				key, err := x509.ParsePKCS8PrivateKey(der)
+				require.NoError(t, err)
+
+				signer, ok := key.(crypto.Signer)
+				require.True(t, ok)
+
+				return signer
+			},
+			equal: func(t *testing.T, expected, actual crypto.Signer) {
+				t.Helper()
+
+				expectedKey, ok := expected.(ed25519.PrivateKey)
+				require.True(t, ok)
+
+				actualKey, ok := actual.(ed25519.PrivateKey)
+				require.True(t, ok)
+
+				assert.Equal(t, expectedKey, actualKey)
+				requirePublicKeysEqual(t, expectedKey.Public(), actualKey.Public())
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := PrivateKeyToPEM(tt.privateKey)
+			require.NoError(t, err)
+
+			block, _ := pem.Decode(raw)
+			require.NotNil(t, block)
+
+			parsed := tt.parse(t, block.Bytes)
+
+			tt.equal(t, tt.privateKey, parsed)
+		})
+	}
+}
+
+func TestPrivateKeyToPEMValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		privateKey  crypto.Signer
+		errContains string
+	}{
+		{"nil private key", nil, "private key is nil"},
+		{"unsupported private key type", fakeSigner{}, "unsupported private key type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := PrivateKeyToPEM(tt.privateKey)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestGenerateCACertificatePrivateKeyPEM(t *testing.T) {
+	t.Parallel()
+
+	certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"))
+	require.NoError(t, err)
+
+	certificateBlock, _ := pem.Decode(certificatePEM)
+	require.NotNil(t, certificateBlock)
+	assert.Equal(t, "CERTIFICATE", certificateBlock.Type)
+
+	privateKeyBlock, _ := pem.Decode(privateKeyPEM)
+	require.NotNil(t, privateKeyBlock)
+	assert.Equal(t, "RSA PRIVATE KEY", privateKeyBlock.Type)
+
+	certificate, err := x509.ParseCertificate(certificateBlock.Bytes)
+	require.NoError(t, err)
+	assert.Equal(t, "Test CA", certificate.Subject.CommonName)
+
+	privateKey, err := x509.ParsePKCS1PrivateKey(privateKeyBlock.Bytes)
+	require.NoError(t, err)
+
+	requirePublicKeysEqual(t, privateKey.Public(), certificate.PublicKey)
+
+	_, _, err = GenerateCACertificatePrivateKeyPEM()
+	require.ErrorContains(t, err, "CommonName is empty")
+}
+
+func TestNormalizeHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"plain hostname", "example.com", "example.com"},
+		{"hostname with port", "example.com:443", "example.com"},
+		{"uppercase hostname", "EXAMPLE.COM", "example.com"},
+		{"uppercase hostname with port", "EXAMPLE.COM:443", "example.com"},
+		{"trailing dot", "example.com.", "example.com"},
+		{"trailing dot with port", "example.com.:443", "example.com"},
+		{"NFD folded to NFC", "café.com", "café.com"},
+		{"NFD with port", "café.com:443", "café.com"},
+		{"ipv6 address with port", "[::1]:443", "::1"},
+		{"empty hostname", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, normalizeHost(tt.host))
+		})
+	}
+}
+
+func TestGenerateSerialNumber(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]struct{}, 100)
+
+	for range 100 {
+		serialNumber, err := generateSerialNumber()
+		require.NoError(t, err)
+		require.NotNil(t, serialNumber)
+
+		assert.GreaterOrEqual(t, serialNumber.Sign(), 0)
+		assert.LessOrEqual(t, serialNumber.BitLen(), 128)
+
+		key := serialNumber.String()
+
+		_, exists := seen[key]
+		require.False(t, exists, "duplicate serial number %s", key)
+
+		seen[key] = struct{}{}
+	}
+}
+
+func TestGenerateSubjectKeyID(t *testing.T) {
+	t.Parallel()
+
+	rsaPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	ecdsaPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	_, ed25519PrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		publicKey crypto.PublicKey
+	}{
+		{"rsa", rsaPrivateKey.Public()},
+		{"ecdsa", ecdsaPrivateKey.Public()},
+		{"ed25519", ed25519PrivateKey.Public()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pkixDER, err := x509.MarshalPKIXPublicKey(tt.publicKey)
+			require.NoError(t, err)
+
+			expected := sha256.Sum256(pkixDER)
+
+			ski, err := generateSubjectKeyID(tt.publicKey)
+			require.NoError(t, err)
+			assert.Equal(t, expected[:], ski)
+
+			again, err := generateSubjectKeyID(tt.publicKey)
+			require.NoError(t, err)
+			assert.Equal(t, ski, again)
+		})
+	}
+
+	t.Run("nil public key", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := generateSubjectKeyID(nil)
+		require.ErrorContains(t, err, "public key is nil")
+	})
+}
+
+func TestIsCacheEntryValid(t *testing.T) {
+	t.Parallel()
+
+	ca := newTestAuthority(t)
+
+	now := time.Now()
+
+	tests := []struct {
+		name  string
+		entry *tlsCertificateCacheEntry
+		want  bool
+	}{
+		{"nil certificate", &tlsCertificateCacheEntry{certificate: nil, createdAt: now}, false},
+		{"nil leaf", &tlsCertificateCacheEntry{certificate: &tls.Certificate{}, createdAt: now}, false},
+		{"fresh entry", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, createdAt: now}, true},
+		{"entry older than max age", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, createdAt: now.Add(-2 * time.Hour)}, false},
+		{"expired leaf", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, createdAt: now}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, ca.isCacheEntryValid(tt.entry))
+		})
+	}
+}
+
+func TestClearOldCacheEntries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removes exactly the oldest entry", func(t *testing.T) {
+		t.Parallel()
+
+		ca := newTestAuthority(t)
+
+		now := time.Now()
+
+		ca.cache["oldest.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-3 * time.Hour)}
+		ca.cache["middle.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-2 * time.Hour)}
+		ca.cache["newest.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-time.Hour)}
+
+		ca.clearOldCacheEntries()
+
+		assert.Len(t, ca.cache, 2)
+		assert.NotContains(t, ca.cache, "oldest.example.com")
+		assert.Contains(t, ca.cache, "middle.example.com")
+		assert.Contains(t, ca.cache, "newest.example.com")
+	})
+
+	t.Run("empty cache is a safe no-op", func(t *testing.T) {
+		t.Parallel()
+
+		ca := newTestAuthority(t)
+
+		ca.clearOldCacheEntries()
+
+		assert.Empty(t, ca.cache)
+	})
 }

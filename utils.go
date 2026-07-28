@@ -78,13 +78,13 @@ func LoadCertificatePrivateKeyFromFiles(certificateFilePath, certificatePrivateK
 //
 // Parameters:
 //   - certificate (*x509.Certificate): A pointer to the X.509 certificate to save.
-//   - certificateFilePath (string): The file path where the certificate will be saved in PEM format.
 //   - privateKey (crypto.Signer): The private key to save, implementing the crypto.Signer interface.
+//   - certificateFilePath (string): The file path where the certificate will be saved in PEM format.
 //   - privateKeyFilePath (string): The file path where the private key will be saved in PEM format.
 //
 // Returns:
 //   - err (error): An error if directory creation, PEM conversion, or file writing fails; otherwise, nil.
-func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, certificateFilePath string, privateKey crypto.Signer, privateKeyFilePath string) (err error) {
+func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, privateKey crypto.Signer, certificateFilePath, privateKeyFilePath string) (err error) {
 	if certificate == nil {
 		err = errors.New("invalid input, certificate is nil")
 

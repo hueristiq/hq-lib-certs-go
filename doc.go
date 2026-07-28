@@ -20,7 +20,7 @@
 //
 // RSA-2048, ECDSA (NIST P-256), and Ed25519 are supported through the
 // [crypto.Signer] interface. Select the CA's algorithm with
-// [CACertificatePrivateKeyWithKeyType]. Every leaf certificate inherits the
+// [WithCAKeyType]. Every leaf certificate inherits the
 // CA's algorithm, so an ECDSA or Ed25519 CA yields markedly faster per-host
 // issuance than RSA.
 //
@@ -30,8 +30,8 @@
 // certificates:
 //
 //	caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-//		certs.CACertificatePrivateKeyWithCommonName("Example Root CA"),
-//		certs.CACertificatePrivateKeyWithKeyType(certs.KeyTypeECDSAP256),
+//		certs.WithCACommonName("Example Root CA"),
+//		certs.WithCAKeyType(certs.KeyTypeECDSAP256),
 //	)
 //	if err != nil {
 //		log.Fatal(err)
@@ -59,6 +59,6 @@
 // are clamped to the CA's expiry so they never outlive their issuer. TLS configs
 // produced by the authority require TLS 1.2 or higher and, by default, advertise
 // the HTTP/2 and HTTP/1.1 ALPN protocols (overridable with
-// [TLSConfigWithNextProtos]). A [CertificateAuthority] is safe for concurrent
+// [WithNextProtos]). A [CertificateAuthority] is safe for concurrent
 // use by multiple goroutines.
 package certs
