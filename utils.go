@@ -1,6 +1,7 @@
 package certs
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -71,6 +72,7 @@ func LoadCertificatePrivateKeyFromFiles(certificateFilePath, certificatePrivateK
 
 // SaveCertificatePrivateKeyToFiles saves a certificate and its private key to the specified files in PEM format.
 //
+// The private key is verified to match the certificate's public key before anything is written.
 // The certificate and private key are converted to PEM format and written to the provided file paths.
 // The directories for both files are created with permissions 0755 if they do not exist. Files are
 // written with restrictive permissions (0600) to ensure security for sensitive data. The private key must
@@ -83,7 +85,8 @@ func LoadCertificatePrivateKeyFromFiles(certificateFilePath, certificatePrivateK
 //   - privateKeyFilePath (string): The file path where the private key will be saved in PEM format.
 //
 // Returns:
-//   - err (error): An error if directory creation, PEM conversion, or file writing fails; otherwise, nil.
+//   - err (error): An error if the certificate and private key do not match, or directory creation,
+//     PEM conversion, or file writing fails; otherwise, nil.
 func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, privateKey crypto.Signer, certificateFilePath, privateKeyFilePath string) (err error) {
 	if certificate == nil {
 		err = errors.New("invalid input, certificate is nil")
@@ -99,6 +102,26 @@ func SaveCertificatePrivateKeyToFiles(certificate *x509.Certificate, privateKey 
 
 	if certificateFilePath == "" || privateKeyFilePath == "" {
 		err = errors.New("invalid input, certificate file path or private key file path is empty")
+
+		return err
+	}
+
+	certificatePublicKey, err := x509.MarshalPKIXPublicKey(certificate.PublicKey)
+	if err != nil {
+		err = fmt.Errorf("invalid input, certificate public key (type %T) cannot be marshaled: %w", certificate.PublicKey, err)
+
+		return err
+	}
+
+	privateKeyPublicKey, err := x509.MarshalPKIXPublicKey(privateKey.Public())
+	if err != nil {
+		err = fmt.Errorf("invalid input, private key's public key (type %T) cannot be marshaled: %w", privateKey.Public(), err)
+
+		return err
+	}
+
+	if !bytes.Equal(certificatePublicKey, privateKeyPublicKey) {
+		err = errors.New("invalid input, private key does not match the certificate's public key")
 
 		return err
 	}
@@ -165,7 +188,7 @@ func mkdir(path string) (err error) {
 		return err
 	}
 
-	if err = os.MkdirAll(path, 0o755); err != nil {
+	if err = os.MkdirAll(path, 0o755); err != nil { //nolint:gosec // G301: certificate directories are deliberately world-traversable (0755); the files within are written 0600
 		err = fmt.Errorf("creating directory %q with permissions 0755: %w", path, err)
 
 		return err
@@ -177,8 +200,9 @@ func mkdir(path string) (err error) {
 // writeToFile writes the content of a byte slice to a file with restrictive permissions.
 //
 // The file is written with permissions 0600 (rw-------) to ensure security for sensitive data like
-// certificates and private keys. Note that the permissions apply only when the file is created;
-// an existing file keeps its current permissions.
+// certificates and private keys. Because the permissions passed to os.WriteFile apply only when
+// the file is created, they are re-applied with os.Chmod after writing so a pre-existing file
+// with looser permissions is tightened as well.
 //
 // On Windows, permission bits are not honored beyond the read-only attribute.
 //
@@ -203,6 +227,14 @@ func writeToFile(content []byte, path string) (err error) {
 
 	if err = os.WriteFile(path, content, 0o600); err != nil {
 		err = fmt.Errorf("writing content to file %q with permissions 0600: %w", path, err)
+
+		return err
+	}
+
+	// os.WriteFile applies the permissions only when creating the file, so
+	// re-apply them to tighten a pre-existing file with looser permissions.
+	if err = os.Chmod(path, 0o600); err != nil {
+		err = fmt.Errorf("setting permissions 0600 on file %q: %w", path, err)
 
 		return err
 	}

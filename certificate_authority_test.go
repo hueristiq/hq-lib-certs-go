@@ -87,6 +87,40 @@ func newTestCSR(t *testing.T, commonName string, dnsNames []string) (csr *x509.C
 	return csr
 }
 
+// newSelfSignedCACertificate builds a self-signed CA certificate over the given
+// private key from a template, applying mutate before creation so tests can
+// tailor the validity period and constraints.
+func newSelfSignedCACertificate(t *testing.T, privateKey crypto.Signer, mutate func(*x509.Certificate)) (certificate *x509.Certificate) {
+	t.Helper()
+
+	serialNumber, err := generateSerialNumber()
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		SerialNumber:          serialNumber,
+		Subject: pkix.Name{
+			CommonName: "Test CA",
+		},
+	}
+
+	if mutate != nil {
+		mutate(template)
+	}
+
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, privateKey.Public(), privateKey)
+	require.NoError(t, err)
+
+	certificate, err = x509.ParseCertificate(certificateDER)
+	require.NoError(t, err)
+
+	return certificate
+}
+
 // requirePublicKeysEqual asserts that two public keys encode to the same PKIX bytes.
 func requirePublicKeysEqual(t *testing.T, expected, actual crypto.PublicKey) {
 	t.Helper()
@@ -168,9 +202,12 @@ func TestNewValidation(t *testing.T) {
 	withoutCertSign.KeyUsage = x509.KeyUsageCRLSign
 
 	unsupportedPublicKeyCertificate := &x509.Certificate{
-		IsCA:      true,
-		KeyUsage:  x509.KeyUsageCertSign,
-		PublicKey: "unsupported",
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		PublicKey:             "unsupported",
 	}
 
 	tests := []struct {
@@ -226,6 +263,60 @@ func TestNewRejectsInvalidCacheOptions(t *testing.T) {
 			assert.Nil(t, ca)
 		})
 	}
+}
+
+func TestNewRejectsUnusableCACertificate(t *testing.T) {
+	t.Parallel()
+
+	newEd25519CA := func(t *testing.T, mutate func(*x509.Certificate)) (certificate *x509.Certificate, privateKey crypto.Signer) {
+		t.Helper()
+
+		_, ed25519PrivateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+
+		return newSelfSignedCACertificate(t, ed25519PrivateKey, mutate), ed25519PrivateKey
+	}
+
+	t.Run("expired CA certificate", func(t *testing.T) {
+		t.Parallel()
+
+		certificate, privateKey := newEd25519CA(t, func(template *x509.Certificate) {
+			template.NotBefore = time.Now().Add(-2 * time.Hour)
+			template.NotAfter = time.Now().Add(-time.Hour)
+		})
+
+		ca, err := New(certificate, privateKey)
+		require.ErrorContains(t, err, "CA certificate has expired")
+		assert.Nil(t, ca)
+	})
+
+	t.Run("not yet valid CA certificate", func(t *testing.T) {
+		t.Parallel()
+
+		certificate, privateKey := newEd25519CA(t, func(template *x509.Certificate) {
+			template.NotBefore = time.Now().Add(time.Hour)
+			template.NotAfter = time.Now().Add(2 * time.Hour)
+		})
+
+		ca, err := New(certificate, privateKey)
+		require.ErrorContains(t, err, "CA certificate is not yet valid")
+		assert.Nil(t, ca)
+	})
+
+	t.Run("basic constraints not valid", func(t *testing.T) {
+		t.Parallel()
+
+		certificate, privateKey := newEd25519CA(t, nil)
+
+		// A certificate issued without a basicConstraints extension would parse
+		// with IsCA=false and fail the earlier check, so flip the flag on the
+		// parsed copy to exercise this rejection in isolation.
+		certificate.BasicConstraintsValid = false
+
+		ca, err := New(certificate, privateKey)
+		require.ErrorContains(t, err, "BasicConstraintsValid is false")
+		assert.Nil(t, ca)
+	})
 }
 
 func TestNewFromPEM(t *testing.T) {
@@ -717,7 +808,7 @@ func TestTLSServerHandshakeWithHostFallback(t *testing.T) {
 	serverConfig := ca.NewTLSConfigWithHost("fallback.example.com")
 	clientConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true, // exercised to reach the handshake without SNI
+		InsecureSkipVerify: true, //nolint:gosec // G402: verification is disabled on purpose to exercise the handshake without SNI
 	}
 
 	clientState, serverErr, clientErr := handshakeOverPipe(t, serverConfig, clientConfig)
@@ -746,7 +837,7 @@ func TestGenerateCACertificatePrivateKeyDefaults(t *testing.T) {
 	assert.True(t, certificate.BasicConstraintsValid)
 	assert.Equal(t, x509.KeyUsageCertSign|x509.KeyUsageCRLSign, certificate.KeyUsage)
 	assert.Empty(t, certificate.Subject.Organization)
-	assert.GreaterOrEqual(t, certificate.SerialNumber.Sign(), 0)
+	assert.Positive(t, certificate.SerialNumber.Sign())
 	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
 	assert.Len(t, certificate.SubjectKeyId, 32)
 
@@ -879,7 +970,7 @@ func TestGenerateTLSCertificateSuccess(t *testing.T) {
 	assert.Empty(t, certificate.Subject.Organization)
 	assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, certificate.ExtKeyUsage)
 	assert.Equal(t, x509.KeyUsageKeyEncipherment|x509.KeyUsageDigitalSignature, certificate.KeyUsage)
-	assert.GreaterOrEqual(t, certificate.SerialNumber.Sign(), 0)
+	assert.Positive(t, certificate.SerialNumber.Sign())
 	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
 	assert.Len(t, certificate.SubjectKeyId, 32)
 
@@ -923,7 +1014,13 @@ func TestGenerateTLSCertificateLeafKeyMatchesCAKeyType(t *testing.T) {
 
 			switch kt.keyType {
 			case KeyTypeRSA2048:
-				assert.IsType(t, &rsa.PrivateKey{}, privateKey)
+				leafKey, ok := privateKey.(*rsa.PrivateKey)
+				require.True(t, ok)
+
+				caKey, ok := caPrivateKey.(*rsa.PrivateKey)
+				require.True(t, ok)
+
+				assert.Equal(t, caKey.N.BitLen(), leafKey.N.BitLen())
 			case KeyTypeECDSAP256:
 				leafKey, ok := privateKey.(*ecdsa.PrivateKey)
 				require.True(t, ok)
@@ -941,6 +1038,29 @@ func TestGenerateTLSCertificateLeafKeyMatchesCAKeyType(t *testing.T) {
 			requirePublicKeysEqual(t, privateKey.Public(), certificate.PublicKey)
 		})
 	}
+}
+
+func TestGenerateTLSCertificateRSALeafInheritsCAKeySize(t *testing.T) {
+	t.Parallel()
+
+	caPrivateKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	require.NoError(t, err)
+
+	caCertificate := newSelfSignedCACertificate(t, caPrivateKey, nil)
+
+	ca, err := New(caCertificate, caPrivateKey)
+	require.NoError(t, err)
+
+	certificate, privateKey, err := ca.GenerateTLSCertificate([]string{"example.com"})
+	require.NoError(t, err)
+
+	leafPrivateKey, ok := privateKey.(*rsa.PrivateKey)
+	require.True(t, ok)
+	assert.Equal(t, 4096, leafPrivateKey.N.BitLen())
+
+	leafPublicKey, ok := certificate.PublicKey.(*rsa.PublicKey)
+	require.True(t, ok)
+	assert.Equal(t, 4096, leafPublicKey.N.BitLen())
 }
 
 func TestGenerateTLSCertificateHostClassification(t *testing.T) {
@@ -1477,7 +1597,7 @@ func TestGenerateSerialNumber(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, serialNumber)
 
-		assert.GreaterOrEqual(t, serialNumber.Sign(), 0)
+		assert.Positive(t, serialNumber.Sign())
 		assert.LessOrEqual(t, serialNumber.BitLen(), 128)
 
 		key := serialNumber.String()

@@ -1,10 +1,10 @@
 # hq-lib-certs-go
 
-![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/master/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/master/CONTRIBUTING.md)
+![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md)
 
 `hq-lib-certs-go` is a [Go (Golang)](http://golang.org/) package for generating, managing, and signing X.509 certificates.
 
-## Resource
+## Resources
 
 - [Features](#features)
 - [Installation](#installation)
@@ -21,7 +21,7 @@
 ## Features
 
 - **Self-Signed CA Generation:** Create CA certificates with customizable subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
-- **TLS Certificate Issuance:** Issue signed leaf certificates for DNS names, IP addresses, email addresses, and URIs, with configurable subject, validity, and extended key usage (server or client/mTLS). Leaf keys match the CA's algorithm.
+- **TLS Certificate Issuance:** Issue signed leaf certificates for DNS names, IP addresses, email addresses, and URIs, with configurable subject, validity, and extended key usage (server or client/mTLS). Leaf keys match the CA's algorithm — an RSA CA passes its key size on to the leaf, and an ECDSA CA passes on its curve.
 - **Dynamic TLS Configuration:** SNI-based certificate generation for TLS servers, with a minimum TLS version of 1.2 and ALPN protocols advertised for HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
 - **Certificate Caching:** In-memory caching of dynamically generated certificates, with cache size and expiry configurable through options on `New`.
 - **PEM and File Helpers:** Encode certificates and keys to PEM, save and load them from disk, and construct an authority directly from PEM bytes.
@@ -178,6 +178,8 @@ clientCert, clientKey, err := ca.GenerateTLSCertificate(
 
 `NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI, caching results to avoid re-issuing on every connection. Tune the cache through options on `New`.
 
+Note that the `GetCertificate` hook mints a new key pair for every distinct requested hostname, so an Internet-facing server should be fronted with rate limiting or an SNI allowlist to avoid CPU exhaustion from unbounded certificate generation.
+
 ```go
 package main
 
@@ -230,7 +232,7 @@ Because the certificates are signed by a self-signed CA, clients must trust `caC
 
 ## Contributing
 
-Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-certs-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-certs-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-certs-go/blob/master/CONTRIBUTING.md).
+Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-certs-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-certs-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md).
 
 A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-certs-go/graphs/contributors) for your ongoing support!
 
@@ -238,4 +240,4 @@ A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-ce
 
 ## Licensing
 
-This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-certs-go/blob/master/LICENSE).
+This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE).

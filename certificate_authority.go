@@ -27,6 +27,13 @@ import (
 
 // caCertificatePrivateKeyOptions defines configuration options for generating a CA certificate and private key pair.
 // This struct is used internally to configure the properties of a self-signed CA certificate.
+//
+// Fields:
+//   - CommonName (string): The Common Name (CN) for the CA certificate's subject; required, with no default.
+//   - Organization ([]string): The organization names for the CA certificate's subject; empty by default.
+//   - ValidFrom (time.Time): The start of the validity period; defaults to the current time, backdated by 5 minutes to tolerate clock skew.
+//   - ValidFor (time.Duration): The validity duration from ValidFrom; defaults to 365 days and must be positive.
+//   - KeyType (KeyType): The private key algorithm to generate; defaults to [KeyTypeRSA2048].
 type caCertificatePrivateKeyOptions struct {
 	CommonName   string
 	Organization []string
@@ -84,6 +91,16 @@ type CAOption func(opts *caCertificatePrivateKeyOptions)
 //
 // A CertificateAuthority is safe for concurrent use by multiple goroutines; the certificate cache
 // and the in-flight generation tracking are guarded by internal mutexes.
+//
+// Fields:
+//   - caCertificate (*x509.Certificate): The CA certificate used to sign issued certificates.
+//   - caCertificatePrivateKey (crypto.Signer): The private key corresponding to the CA certificate.
+//   - cacheMutex (sync.RWMutex): Guards cache, cacheMaxAge, and cacheMaxSize.
+//   - cache (map[string]*tlsCertificateCacheEntry): The generated certificates, keyed by normalized hostname.
+//   - cacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued.
+//   - cacheMaxSize (int): The maximum number of certificates held in the cache.
+//   - inflightMutex (sync.Mutex): Guards inflight.
+//   - inflight (map[string]*inflightCall): In-progress certificate generations, keyed by normalized hostname.
 type CertificateAuthority struct {
 	caCertificate           *x509.Certificate
 	caCertificatePrivateKey crypto.Signer
@@ -138,7 +155,8 @@ func (ca *CertificateAuthority) CACertificatePrivateKey() (privateKey crypto.Sig
 // By default the Common Name is the first host, the Organization is empty, the
 // extended key usage is server authentication ([x509.ExtKeyUsageServerAuth]),
 // the validity period is 365 days from now, and the leaf's key algorithm
-// matches the CA's.
+// matches the CA's: an RSA CA passes its key size on to the leaf, and an ECDSA
+// CA passes on its curve.
 //
 // Parameters:
 //   - hosts ([]string): A slice of hostnames (e.g., DNS names, IPs, emails, or URIs) to include in the certificate.
@@ -201,9 +219,11 @@ func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 
 	switch caKey := ca.caCertificatePrivateKey.(type) {
 	case *rsa.PrivateKey:
-		privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		keySize := caKey.N.BitLen()
+
+		privateKey, err = rsa.GenerateKey(rand.Reader, keySize)
 		if err != nil {
-			err = fmt.Errorf("generating RSA private key (2048 bits): %w", err)
+			err = fmt.Errorf("generating RSA private key (%d bits): %w", keySize, err)
 
 			return nil, nil, err
 		}
@@ -511,6 +531,10 @@ func WithNextProtos(protos ...string) TLSConfigOption {
 // If the authority is nil or uninitialized, the returned configuration fails every handshake with
 // an error instead of silently serving TLS without dynamic certificates.
 //
+// Note that the GetCertificate hook mints a new key pair for every distinct requested hostname,
+// so Internet-facing servers should be fronted with rate limiting or an SNI allowlist to avoid
+// CPU exhaustion from unbounded certificate generation.
+//
 // Parameters:
 //   - ofs (...TLSConfigOption): A variadic list of TLSConfigOption functions to configure
 //     the returned tls.Config (e.g., [WithNextProtos]).
@@ -559,6 +583,10 @@ func (ca *CertificateAuthority) NewTLSConfig(ofs ...TLSConfigOption) (cfg *tls.C
 // Similar to NewTLSConfig, but allows specifying a default hostname to use when SNI is not provided.
 // If the authority is nil or uninitialized, the returned configuration fails every handshake with
 // an error instead of silently serving TLS without dynamic certificates.
+//
+// Note that the GetCertificate hook mints a new key pair for every distinct requested hostname,
+// so Internet-facing servers should be fronted with rate limiting or an SNI allowlist to avoid
+// CPU exhaustion from unbounded certificate generation.
 //
 // Parameters:
 //   - hostname (string): The default hostname to use if SNI is not provided.
@@ -752,6 +780,10 @@ func (ca *CertificateAuthority) clearOldCacheEntries() {
 
 // tlsCertificateCacheEntry represents a cached TLS certificate and its creation time.
 // This struct is used internally by CertificateAuthority to store dynamically generated certificates.
+//
+// Fields:
+//   - certificate (*tls.Certificate): The cached certificate bundle (leaf plus CA chain).
+//   - createdAt (time.Time): When the entry was stored; compared against the cache's maximum age.
 type tlsCertificateCacheEntry struct {
 	certificate *tls.Certificate
 	createdAt   time.Time
@@ -759,6 +791,11 @@ type tlsCertificateCacheEntry struct {
 
 // inflightCall tracks an in-progress certificate generation for a single hostname so that
 // concurrent callers can wait for and share its result instead of generating duplicates.
+//
+// Fields:
+//   - done (chan struct{}): Closed when generation completes, unblocking any waiting callers.
+//   - certificate (*tls.Certificate): The generated certificate; valid once done is closed.
+//   - err (error): The generation failure, if any; valid once done is closed.
 type inflightCall struct {
 	done        chan struct{}
 	certificate *tls.Certificate
@@ -767,6 +804,14 @@ type inflightCall struct {
 
 // tlsCertificatePrivateKeyOptions defines configuration options for generating a TLS certificate and private key pair.
 // This struct is used internally to configure the properties of a TLS certificate signed by the CA.
+//
+// Fields:
+//   - CommonName (string): The Common Name (CN) for the certificate's subject; defaults to the first host.
+//   - Organization ([]string): The organization names for the certificate's subject; empty by default.
+//   - ValidFrom (time.Time): The start of the validity period; defaults to the current time.
+//   - ValidFor (time.Duration): The validity duration from ValidFrom; clamped to the CA's expiry.
+//   - ExtKeyUsage ([]x509.ExtKeyUsage): The extended key usages; defaults to server authentication
+//     (client authentication when signing a CSR).
 type tlsCertificatePrivateKeyOptions struct {
 	CommonName   string
 	Organization []string
@@ -1206,6 +1251,10 @@ func WithTLSExtKeyUsage(usages ...x509.ExtKeyUsage) TLSOption {
 
 // certificateAuthorityOptions defines configuration options for a CertificateAuthority.
 // This struct is used internally to configure the in-memory certificate cache.
+//
+// Fields:
+//   - CacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued; defaults to 1 hour and must be positive.
+//   - CacheMaxSize (int): The maximum number of certificates held in the cache; defaults to 5 and must be positive.
 type certificateAuthorityOptions struct {
 	CacheMaxAge  time.Duration
 	CacheMaxSize int
@@ -1230,7 +1279,7 @@ type AuthorityOption func(opts *certificateAuthorityOptions)
 //   - maxAge (time.Duration): The maximum age for cached certificates (e.g., 1*time.Hour).
 //
 // Returns:
-//   - (AuthorityOption): A AuthorityOption that updates the CacheMaxAge field of the options.
+//   - (AuthorityOption): An AuthorityOption that updates the CacheMaxAge field of the options.
 func WithCacheMaxAge(maxAge time.Duration) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
 		opts.CacheMaxAge = maxAge
@@ -1248,7 +1297,7 @@ func WithCacheMaxAge(maxAge time.Duration) AuthorityOption {
 //   - maxSize (int): The maximum number of cached certificates (e.g., 1024).
 //
 // Returns:
-//   - (AuthorityOption): A AuthorityOption that updates the CacheMaxSize field of the options.
+//   - (AuthorityOption): An AuthorityOption that updates the CacheMaxSize field of the options.
 func WithCacheMaxSize(maxSize int) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
 		opts.CacheMaxSize = maxSize
@@ -1257,8 +1306,9 @@ func WithCacheMaxSize(maxSize int) AuthorityOption {
 
 // New initializes a new CertificateAuthority with the provided CA certificate and private key.
 //
-// It verifies that the certificate is configured as a CA, has the necessary key usage for certificate
-// signing, and that the private key matches the certificate's public key (RSA, ECDSA, or Ed25519).
+// It verifies that the certificate is configured as a CA with valid basic constraints, is within
+// its validity period, has the necessary key usage for certificate signing, and that the private
+// key matches the certificate's public key (RSA, ECDSA, or Ed25519).
 // The cache is initialized with a default maximum age of 1 hour and maximum size of 5 entries, both of
 // which can be overridden via [AuthorityOption] options.
 //
@@ -1279,6 +1329,26 @@ func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...Aut
 
 	if !caCertificate.IsCA {
 		err = errors.New("invalid input, certificate is not configured as a CA (IsCA is false)")
+
+		return nil, err
+	}
+
+	if !caCertificate.BasicConstraintsValid {
+		err = errors.New("invalid input, CA certificate's basic constraints are not valid (BasicConstraintsValid is false)")
+
+		return nil, err
+	}
+
+	now := time.Now()
+
+	if now.Before(caCertificate.NotBefore) {
+		err = fmt.Errorf("invalid input, CA certificate is not yet valid (NotBefore: %v)", caCertificate.NotBefore)
+
+		return nil, err
+	}
+
+	if now.After(caCertificate.NotAfter) {
+		err = fmt.Errorf("invalid input, CA certificate has expired (NotAfter: %v)", caCertificate.NotAfter)
 
 		return nil, err
 	}
@@ -1486,9 +1556,10 @@ func NewFromPEM(caCertificateBytes, caPrivateKeyBytes []byte, ofs ...AuthorityOp
 
 // generateSerialNumber creates a random serial number for use in X.509 certificates.
 //
-// Serial numbers are unique identifiers for certificates, as required by RFC 5280. This function generates a
-// cryptographically secure random number with a maximum bit length of 128 bits, ensuring compliance with common
-// certificate authority requirements.
+// Serial numbers are unique identifiers for certificates, and RFC 5280 requires them to be
+// positive integers. This function generates a cryptographically secure random number with a
+// maximum bit length of 128 bits, redrawing until the value is strictly positive, ensuring
+// compliance with common certificate authority requirements.
 //
 // Returns:
 //   - serialNumber (*big.Int): A pointer to a big.Int representing the generated serial number.
@@ -1496,11 +1567,15 @@ func NewFromPEM(caCertificateBytes, caPrivateKeyBytes []byte, ofs ...AuthorityOp
 func generateSerialNumber() (serialNumber *big.Int, err error) {
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 
-	serialNumber, err = rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		err = fmt.Errorf("generating random serial number (128-bit): %w", err)
+	// rand.Int may return zero, but RFC 5280 requires a positive serial number:
+	// redraw until the value is strictly positive.
+	for serialNumber == nil || serialNumber.Sign() <= 0 {
+		serialNumber, err = rand.Int(rand.Reader, serialNumberLimit)
+		if err != nil {
+			err = fmt.Errorf("generating random serial number (128-bit): %w", err)
 
-		return nil, err
+			return nil, err
+		}
 	}
 
 	return serialNumber, nil
