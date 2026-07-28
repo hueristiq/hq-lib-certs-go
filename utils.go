@@ -180,6 +180,8 @@ func mkdir(path string) (err error) {
 // certificates and private keys. Note that the permissions apply only when the file is created;
 // an existing file keeps its current permissions.
 //
+// On Windows, permission bits are not honored beyond the read-only attribute.
+//
 // Parameters:
 //   - content ([]byte): A byte slice containing the data to write.
 //   - path (string): The file path where the content will be written.

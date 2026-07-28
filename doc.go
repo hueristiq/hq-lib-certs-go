@@ -13,8 +13,13 @@
 //     leaf certificates on demand. Its [CertificateAuthority.NewTLSConfig]
 //     returns a [crypto/tls.Config] whose GetCertificate hook mints a
 //     certificate for the hostname a client requests via Server Name Indication
-//     (SNI). This suits TLS-intercepting proxies and multi-tenant servers that
-//     cannot enumerate their hostnames in advance.
+//     (SNI), and [CertificateAuthority.TLSCertificate] returns the same bundled
+//     *tls.Certificate (leaf plus CA chain) for a host programmatically.
+//     [CertificateAuthority.SignCSR] signs certificate signing requests, for
+//     example to issue client certificates for mutual TLS (client
+//     authentication is the default extended key usage). This suits
+//     TLS-intercepting proxies and multi-tenant servers that cannot enumerate
+//     their hostnames in advance.
 //
 // # Key algorithms
 //
