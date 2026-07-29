@@ -12,9 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// expectedWritePerm returns the permission bits writeToFile leaves on a newly
-// created file. Windows only models the read-only bit, so a 0600 write reports
-// 0666 there.
 func expectedWritePerm() os.FileMode {
 	if runtime.GOOS == "windows" {
 		return 0o666

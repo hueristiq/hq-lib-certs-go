@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testKeyTypes enumerates the supported CA key types for table-driven subtests.
 var testKeyTypes = []struct {
 	name    string
 	keyType KeyType
@@ -34,8 +33,6 @@ var testKeyTypes = []struct {
 	{"ed25519", KeyTypeED25519},
 }
 
-// newTestCACertificatePrivateKey generates a CA certificate and private key for tests.
-// WithCACommonName("Test CA") is prepended to ofs so callers may override it.
 func newTestCACertificatePrivateKey(t *testing.T, ofs ...CAOption) (certificate *x509.Certificate, privateKey crypto.Signer) {
 	t.Helper()
 
@@ -49,7 +46,6 @@ func newTestCACertificatePrivateKey(t *testing.T, ofs ...CAOption) (certificate 
 	return certificate, privateKey
 }
 
-// newTestAuthority builds a CertificateAuthority from a freshly generated test CA.
 func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuthority) {
 	t.Helper()
 
@@ -62,8 +58,6 @@ func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuth
 	return ca
 }
 
-// newTestCSR builds and parses an Ed25519 certificate signing request with the
-// given Common Name and DNS SANs.
 func newTestCSR(t *testing.T, commonName string, dnsNames []string) (csr *x509.CertificateRequest) {
 	t.Helper()
 
@@ -87,9 +81,6 @@ func newTestCSR(t *testing.T, commonName string, dnsNames []string) (csr *x509.C
 	return csr
 }
 
-// newSelfSignedCACertificate builds a self-signed CA certificate over the given
-// private key from a template, applying mutate before creation so tests can
-// tailor the validity period and constraints.
 func newSelfSignedCACertificate(t *testing.T, privateKey crypto.Signer, mutate func(*x509.Certificate)) (certificate *x509.Certificate) {
 	t.Helper()
 
@@ -121,7 +112,6 @@ func newSelfSignedCACertificate(t *testing.T, privateKey crypto.Signer, mutate f
 	return certificate
 }
 
-// requirePublicKeysEqual asserts that two public keys encode to the same PKIX bytes.
 func requirePublicKeysEqual(t *testing.T, expected, actual crypto.PublicKey) {
 	t.Helper()
 
@@ -134,9 +124,6 @@ func requirePublicKeysEqual(t *testing.T, expected, actual crypto.PublicKey) {
 	assert.Equal(t, expectedDER, actualDER)
 }
 
-// handshakeOverPipe runs a TLS handshake between a server and a client over an
-// in-memory pipe, so no network ports are involved. It returns the client-side
-// connection state along with both handshake outcomes.
 func handshakeOverPipe(t *testing.T, serverConfig, clientConfig *tls.Config) (clientState tls.ConnectionState, serverErr, clientErr error) {
 	t.Helper()
 
@@ -154,8 +141,6 @@ func handshakeOverPipe(t *testing.T, serverConfig, clientConfig *tls.Config) (cl
 	clientErr = client.HandshakeContext(t.Context())
 	clientState = client.ConnectionState()
 
-	// Closing the client end unblocks a server handshake that is still waiting
-	// (for example after the client aborted with an alert).
 	_ = clientConn.Close()
 
 	serverErr = <-serverErrCh
@@ -308,9 +293,6 @@ func TestNewRejectsUnusableCACertificate(t *testing.T) {
 
 		certificate, privateKey := newEd25519CA(t, nil)
 
-		// A certificate issued without a basicConstraints extension would parse
-		// with IsCA=false and fail the earlier check, so flip the flag on the
-		// parsed copy to exercise this rejection in isolation.
 		certificate.BasicConstraintsValid = false
 
 		ca, err := New(certificate, privateKey)
@@ -609,7 +591,6 @@ func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 	ca.cacheMutex.RUnlock()
 	require.True(t, exists)
 
-	// Backdate the cache entry so it is older than the configured maximum age.
 	ca.cacheMutex.Lock()
 	entry.createdAt = time.Now().Add(-2 * time.Minute)
 	ca.cacheMutex.Unlock()
@@ -633,7 +614,6 @@ func TestGetTLSCertificateRegeneratesWhenLeafExpired(t *testing.T) {
 	ca.cacheMutex.RUnlock()
 	require.True(t, exists)
 
-	// Expire the cached leaf so the entry is no longer servable.
 	ca.cacheMutex.Lock()
 	entry.certificate.Leaf.NotAfter = time.Now().Add(-time.Hour)
 	ca.cacheMutex.Unlock()
@@ -841,8 +821,6 @@ func TestGenerateCACertificatePrivateKeyDefaults(t *testing.T) {
 	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
 	assert.Len(t, certificate.SubjectKeyId, 32)
 
-	// NotBefore is backdated by 5 minutes from the generation time to tolerate
-	// clock skew, and NotAfter is exactly ValidFrom + 365 days.
 	assert.WithinDuration(t, before.Add(-5*time.Minute), certificate.NotBefore, time.Minute)
 	assert.True(t, certificate.NotAfter.Equal(certificate.NotBefore.Add(365*24*time.Hour+5*time.Minute)))
 
@@ -974,9 +952,6 @@ func TestGenerateTLSCertificateSuccess(t *testing.T) {
 	assert.LessOrEqual(t, certificate.SerialNumber.BitLen(), 128)
 	assert.Len(t, certificate.SubjectKeyId, 32)
 
-	// NotBefore is backdated by 5 minutes from the generation time. The leaf
-	// asks for 365 days starting now, which outlives the CA's remaining
-	// lifetime, so NotAfter is clamped to the CA's expiry (~365 days out).
 	assert.WithinDuration(t, before.Add(-5*time.Minute), certificate.NotBefore, time.Minute)
 
 	caCertificate := ca.CACertificate()
@@ -1251,7 +1226,6 @@ func TestSignCSRSuccess(t *testing.T) {
 	assert.Equal(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, certificate.ExtKeyUsage)
 	assert.Equal(t, x509.KeyUsageKeyEncipherment|x509.KeyUsageDigitalSignature, certificate.KeyUsage)
 
-	// The SKI is the SHA-256 of the CSR public key's PKIX encoding.
 	expectedSKI, err := generateSubjectKeyID(csr.PublicKey)
 	require.NoError(t, err)
 
@@ -1305,8 +1279,6 @@ func TestSignCSRClampsValidityToCAExpiry(t *testing.T) {
 	assert.True(t, certificate.NotAfter.Equal(caCertificate.NotAfter))
 }
 
-// fakeSigner is a crypto.Signer whose key type is none of RSA, ECDSA, or
-// Ed25519, used to exercise the unsupported key type error paths.
 type fakeSigner struct{}
 
 func (fakeSigner) Public() crypto.PublicKey {
