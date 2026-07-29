@@ -2,7 +2,7 @@
 
 ![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md)
 
-`hq-lib-certs-go` is a [Go (Golang)](http://golang.org/) package for generating, managing, and signing X.509 certificates.
+`hq-lib-certs-go` is a [Go (Golang)](https://golang.org/) package for generating, managing, and signing X.509 certificates.
 
 ## Resources
 
@@ -36,6 +36,12 @@ go get -v -u github.com/hueristiq/hq-lib-certs-go
 ```
 
 ## Usage
+
+The examples below import the package under the `hqgocerts` alias.
+
+```go
+import hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+```
 
 ### Generating a CA Certificate
 
