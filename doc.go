@@ -9,8 +9,9 @@
 //     signed by that CA. PEM helpers ([CertificateToPEM], [PrivateKeyToPEM])
 //     and file helpers ([SaveCertificatePrivateKeyToFiles],
 //     [LoadCertificatePrivateKeyFromFiles]) move certificates to and from disk.
-//   - A long-lived signing authority. [CertificateAuthority] issues and caches
-//     leaf certificates on demand. Its [CertificateAuthority.NewTLSConfig]
+//   - A long-lived signing authority. [CertificateAuthority] issues leaf
+//     certificates on demand, optionally caching them via [WithCache]. Its
+//     [CertificateAuthority.NewTLSConfig]
 //     returns a [crypto/tls.Config] whose GetCertificate hook mints a
 //     certificate for the hostname a client requests via Server Name Indication
 //     (SNI), and [CertificateAuthority.TLSCertificate] returns the same bundled

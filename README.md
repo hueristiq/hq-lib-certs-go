@@ -2,7 +2,7 @@
 
 ![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md)
 
-`hq-lib-certs-go` is a [Go (Golang)](https://golang.org/) package for generating, managing, and signing X.509 certificates.
+`hq-lib-certs-go` is a [Go](https://golang.org/) package for generating, managing, and signing X.509 certificates.
 
 ## Resources
 
@@ -23,9 +23,7 @@
 - **Self-Signed CA Generation:** Create CA certificates with customizable subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
 - **TLS Certificate Issuance:** Issue signed leaf certificates for DNS names, IP addresses, email addresses, and URIs, with configurable subject, validity, and extended key usage (server or client/mTLS). Leaf keys match the CA's algorithm — an RSA CA passes its key size on to the leaf, and an ECDSA CA passes on its curve.
 - **Dynamic TLS Configuration:** SNI-based certificate generation for TLS servers, with a minimum TLS version of 1.2 and ALPN protocols advertised for HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
-- **Certificate Caching:** In-memory caching of dynamically generated certificates, with cache size and expiry configurable through options on `New`.
-- **PEM and File Helpers:** Encode certificates and keys to PEM, save and load them from disk, and construct an authority directly from PEM bytes.
-- **Standards Compliance:** Follows RFC 5280 for certificate generation and RFC 7468 for PEM encoding.
+- **Opt-In Certificate Caching:** Pluggable caching of dynamically generated certificates via the `cache` package — pass a `cache.CertificateCache` (e.g., `cache.NewInMemory`) to `New` with `WithCache` and tune expiry with `WithCacheMaxAge`. Without a cache, certificates are regenerated per request.
 
 ## Installation
 
@@ -182,7 +180,9 @@ clientCert, clientKey, err := ca.GenerateTLSCertificate(
 
 ### Configuring a TLS Server with SNI
 
-`NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI, caching results to avoid re-issuing on every connection. Tune the cache through options on `New`.
+`NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI. Caching is opt-in: pass a cache from the `cache` package to `New` via `WithCache` to reuse certificates across connections, and tune entry expiry with `WithCacheMaxAge`. Without a cache, a certificate is regenerated for every request.
+
+> **Breaking change:** previous versions cached by default and sized the cache with `WithCacheMaxSize`. That option has been removed — an authority created without `WithCache` regenerates a certificate per request, and cache sizing is now the cache implementation's concern (for example, `cache.NewInMemory(1024)`).
 
 Note that the `GetCertificate` hook mints a new key pair for every distinct requested hostname, so an Internet-facing server should be fronted with rate limiting or an SNI allowlist to avoid CPU exhaustion from unbounded certificate generation.
 
@@ -195,6 +195,7 @@ import (
 	"time"
 
 	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+	hqgocertscache "github.com/hueristiq/hq-lib-certs-go/cache"
 )
 
 func main() {
@@ -206,9 +207,14 @@ func main() {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
-	// Initialize the CertificateAuthority, tuning the certificate cache.
+	// Initialize the certificate cache and the CertificateAuthority.
+	certificateCache, err := hqgocertscache.NewInMemory(1024)
+	if err != nil {
+		log.Fatalf("Failed to initialize certificate cache: %v", err)
+	}
+
 	ca, err := hqgocerts.New(caCert, caKey,
-		hqgocerts.WithCacheMaxSize(1024),
+		hqgocerts.WithCache(certificateCache),
 		hqgocerts.WithCacheMaxAge(6*time.Hour),
 	)
 	if err != nil {

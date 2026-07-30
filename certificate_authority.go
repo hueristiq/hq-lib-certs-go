@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/hueristiq/hq-lib-certs-go/cache"
 )
 
 // caCertificatePrivateKeyOptions defines configuration options for generating a CA certificate and private key pair.
@@ -63,8 +65,6 @@ const (
 const (
 	// defaultCacheMaxAge is the default maximum age of a cached certificate before it is re-issued.
 	defaultCacheMaxAge = time.Hour
-	// defaultCacheMaxSize is the default maximum number of certificates held in the cache.
-	defaultCacheMaxSize = 5
 	// defaultLeafCertificateValidity is the validity period of certificates issued dynamically
 	// by the SNI-driven TLS configuration.
 	defaultLeafCertificateValidity = 24 * time.Hour
@@ -81,34 +81,31 @@ type CAOption func(opts *caCertificatePrivateKeyOptions)
 
 // A CertificateAuthority generates and signs TLS certificates from a single CA certificate and
 // its private key. It issues certificates dynamically for the hostname requested via Server Name
-// Indication (SNI) and caches them to avoid re-issuing on every connection; the cache size and
-// expiry are configurable (see [WithCacheMaxSize] and
-// [WithCacheMaxAge]).
+// Indication (SNI). Caching of issued certificates is opt-in: pass a [cache.CertificateCache]
+// via [WithCache] to reuse certificates across requests, or leave it unset (nil cache) to
+// regenerate a certificate on every request.
 //
 // The zero value is not usable: construct a CertificateAuthority with [New] (from an in-memory
 // certificate and key), with [NewFromPEM] (from PEM bytes), or generate a
 // fresh CA first with [GenerateCACertificatePrivateKey].
 //
-// A CertificateAuthority is safe for concurrent use by multiple goroutines; the certificate cache
-// and the in-flight generation tracking are guarded by internal mutexes.
+// A CertificateAuthority is safe for concurrent use by multiple goroutines; the in-flight
+// generation tracking is guarded by an internal mutex, and a configured cache must be safe
+// for concurrent use as well.
 //
 // Fields:
 //   - caCertificate (*x509.Certificate): The CA certificate used to sign issued certificates.
 //   - caCertificatePrivateKey (crypto.Signer): The private key corresponding to the CA certificate.
-//   - cacheMutex (sync.RWMutex): Guards cache, cacheMaxAge, and cacheMaxSize.
-//   - cache (map[string]*tlsCertificateCacheEntry): The generated certificates, keyed by normalized hostname.
+//   - cache (cache.CertificateCache): The cache of generated certificates, keyed by normalized hostname; nil disables caching.
 //   - cacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued.
-//   - cacheMaxSize (int): The maximum number of certificates held in the cache.
 //   - inflightMutex (sync.Mutex): Guards inflight.
 //   - inflight (map[string]*inflightCall): In-progress certificate generations, keyed by normalized hostname.
 type CertificateAuthority struct {
 	caCertificate           *x509.Certificate
 	caCertificatePrivateKey crypto.Signer
 
-	cacheMutex   sync.RWMutex
-	cache        map[string]*tlsCertificateCacheEntry
-	cacheMaxAge  time.Duration
-	cacheMaxSize int
+	cache       cache.CertificateCache
+	cacheMaxAge time.Duration
 
 	inflightMutex sync.Mutex
 	inflight      map[string]*inflightCall
@@ -330,16 +327,16 @@ func (ca *CertificateAuthority) GenerateTLSCertificate(hosts []string, ofs ...TL
 	return certificate, privateKey, nil
 }
 
-// TLSCertificate returns a TLS certificate for the given hostname, generating and caching it on
-// first use and serving the cached certificate on subsequent calls.
+// TLSCertificate returns a TLS certificate for the given hostname. The certificate is
+// regenerated on every call unless a cache is configured via [WithCache], in which case
+// the cached certificate is served while it remains valid (see [WithCacheMaxAge]).
 //
 // The hostname is normalized before lookup (port stripped, Unicode NFC folded to lowercase, trailing
 // dot removed), and concurrent calls for the same host share a single generation.
 //
 // The returned bundle chains to the CA certificate: Certificate[0] is the leaf
 // certificate, Certificate[1] is the CA certificate, and the Leaf field is
-// populated. The cache is configured with [WithCacheMaxAge] and
-// [WithCacheMaxSize] on [New].
+// populated.
 //
 // Parameters:
 //   - hostname (string): The hostname to issue the certificate for (e.g., "example.com").
@@ -531,6 +528,7 @@ func WithNextProtos(protos ...string) TLSConfigOption {
 // If the authority is nil or uninitialized, the returned configuration fails every handshake with
 // an error instead of silently serving TLS without dynamic certificates.
 //
+// Certificates are regenerated per request unless a cache is configured via [WithCache].
 // Note that the GetCertificate hook mints a new key pair for every distinct requested hostname,
 // so Internet-facing servers should be fronted with rate limiting or an SNI allowlist to avoid
 // CPU exhaustion from unbounded certificate generation.
@@ -584,6 +582,7 @@ func (ca *CertificateAuthority) NewTLSConfig(ofs ...TLSConfigOption) (cfg *tls.C
 // If the authority is nil or uninitialized, the returned configuration fails every handshake with
 // an error instead of silently serving TLS without dynamic certificates.
 //
+// Certificates are regenerated per request unless a cache is configured via [WithCache].
 // Note that the GetCertificate hook mints a new key pair for every distinct requested hostname,
 // so Internet-facing servers should be fronted with rate limiting or an SNI allowlist to avoid
 // CPU exhaustion from unbounded certificate generation.
@@ -631,9 +630,10 @@ func (ca *CertificateAuthority) NewTLSConfigWithHost(hostname string, ofs ...TLS
 
 // getTLSCertificate retrieves or generates a TLS certificate for the given hostname.
 //
-// This internal method checks the cache for an existing certificate for the normalized hostname.
-// If a valid cached certificate exists (neither older than cacheMaxAge nor expired), it is returned.
-// Otherwise, a new certificate is generated and stored in the cache. Concurrent generation for the
+// This internal method checks the configured cache, if any, for an existing certificate for the
+// normalized hostname. If a valid cached certificate exists (neither older than cacheMaxAge nor
+// expired), it is returned. Otherwise, a new certificate is generated, and stored in the cache
+// when one is configured. Concurrent generation for the
 // same host is deduplicated: the first caller generates while later callers wait for its result,
 // so a burst of simultaneous handshakes pays for a single key generation.
 //
@@ -646,17 +646,11 @@ func (ca *CertificateAuthority) NewTLSConfigWithHost(hostname string, ofs ...TLS
 func (ca *CertificateAuthority) getTLSCertificate(hostname string) (certificate *tls.Certificate, err error) {
 	host := normalizeHost(hostname)
 
-	ca.cacheMutex.RLock()
-
-	if entry, exists := ca.cache[host]; exists && ca.isCacheEntryValid(entry) {
-		certificate = entry.certificate
-
-		ca.cacheMutex.RUnlock()
-
-		return certificate, nil
+	if ca.cache != nil {
+		if entry, found := ca.cache.Get(host); found && ca.isCacheEntryValid(entry) {
+			return entry.Certificate, nil
+		}
 	}
-
-	ca.cacheMutex.RUnlock()
 
 	// Deduplicate concurrent generation for the same host: the first caller
 	// (the leader) generates while later callers wait on the in-flight call.
@@ -693,7 +687,8 @@ func (ca *CertificateAuthority) getTLSCertificate(hostname string) (certificate 
 	return certificate, err
 }
 
-// generateAndCacheTLSCertificate generates a certificate for the host and stores it in the cache.
+// generateAndCacheTLSCertificate generates a certificate for the host and stores it in the
+// cache when one is configured.
 //
 // Because in-flight generation is deduplicated per host in getTLSCertificate, at most one
 // goroutine runs this method for a given host at a time.
@@ -721,21 +716,11 @@ func (ca *CertificateAuthority) generateAndCacheTLSCertificate(host string) (cer
 		Leaf:       leafCertificate,
 	}
 
-	ca.cacheMutex.Lock()
-
-	defer ca.cacheMutex.Unlock()
-
-	if ca.cache == nil {
-		ca.cache = make(map[string]*tlsCertificateCacheEntry)
-	}
-
-	if _, exists := ca.cache[host]; !exists && len(ca.cache) >= ca.cacheMaxSize {
-		ca.clearOldCacheEntries()
-	}
-
-	ca.cache[host] = &tlsCertificateCacheEntry{
-		certificate: certificate,
-		createdAt:   time.Now(),
+	if ca.cache != nil {
+		ca.cache.Set(host, &cache.CertificateCacheEntry{
+			Certificate: certificate,
+			CreatedAt:   time.Now(),
+		})
 	}
 
 	return certificate, nil
@@ -745,48 +730,16 @@ func (ca *CertificateAuthority) generateAndCacheTLSCertificate(host string) (cer
 // than the configured maximum age and the certificate itself must not have expired.
 //
 // Parameters:
-//   - entry (*tlsCertificateCacheEntry): The cache entry to validate.
+//   - entry (*cache.CertificateCacheEntry): The cache entry to validate.
 //
 // Returns:
 //   - valid (bool): True if the entry may be served to clients; otherwise, false.
-func (ca *CertificateAuthority) isCacheEntryValid(entry *tlsCertificateCacheEntry) (valid bool) {
-	if entry.certificate == nil || entry.certificate.Leaf == nil {
+func (ca *CertificateAuthority) isCacheEntryValid(entry *cache.CertificateCacheEntry) (valid bool) {
+	if entry.Certificate == nil || entry.Certificate.Leaf == nil {
 		return false
 	}
 
-	return time.Since(entry.createdAt) < ca.cacheMaxAge && time.Now().Before(entry.certificate.Leaf.NotAfter)
-}
-
-// clearOldCacheEntries removes the oldest certificate from the cache to make room for new entries.
-//
-// It identifies the certificate with the earliest creation time and removes it from the cache.
-// This is called when the cache reaches its maximum size (cacheMaxSize) to ensure the cache does not grow indefinitely.
-func (ca *CertificateAuthority) clearOldCacheEntries() {
-	var oldestKey string
-
-	var oldestTime time.Time
-
-	for key, entry := range ca.cache {
-		if oldestTime.IsZero() || entry.createdAt.Before(oldestTime) {
-			oldestTime = entry.createdAt
-			oldestKey = key
-		}
-	}
-
-	if oldestKey != "" {
-		delete(ca.cache, oldestKey)
-	}
-}
-
-// tlsCertificateCacheEntry represents a cached TLS certificate and its creation time.
-// This struct is used internally by CertificateAuthority to store dynamically generated certificates.
-//
-// Fields:
-//   - certificate (*tls.Certificate): The cached certificate bundle (leaf plus CA chain).
-//   - createdAt (time.Time): When the entry was stored; compared against the cache's maximum age.
-type tlsCertificateCacheEntry struct {
-	certificate *tls.Certificate
-	createdAt   time.Time
+	return time.Since(entry.CreatedAt) < ca.cacheMaxAge && time.Now().Before(entry.Certificate.Leaf.NotAfter)
 }
 
 // inflightCall tracks an in-progress certificate generation for a single hostname so that
@@ -1250,14 +1203,14 @@ func WithTLSExtKeyUsage(usages ...x509.ExtKeyUsage) TLSOption {
 }
 
 // certificateAuthorityOptions defines configuration options for a CertificateAuthority.
-// This struct is used internally to configure the in-memory certificate cache.
+// This struct is used internally to configure the optional certificate cache.
 //
 // Fields:
+//   - Cache (cache.CertificateCache): The cache for generated certificates; nil by default, meaning certificates are regenerated per request.
 //   - CacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued; defaults to 1 hour and must be positive.
-//   - CacheMaxSize (int): The maximum number of certificates held in the cache; defaults to 5 and must be positive.
 type certificateAuthorityOptions struct {
-	CacheMaxAge  time.Duration
-	CacheMaxSize int
+	Cache       cache.CertificateCache
+	CacheMaxAge time.Duration
 }
 
 // AuthorityOption is a function type used to configure a [CertificateAuthority]
@@ -1271,7 +1224,8 @@ type AuthorityOption func(opts *certificateAuthorityOptions)
 // WithCacheMaxAge sets the maximum age of cached certificates before they expire.
 //
 // The default is 1 hour, and the age must be positive: [New] returns an error
-// otherwise. It governs the cache used by the SNI-driven
+// otherwise. It is consulted only when a cache is configured via [WithCache], and
+// governs the cache used by the SNI-driven
 // [CertificateAuthority.NewTLSConfig] path and
 // [CertificateAuthority.TLSCertificate].
 //
@@ -1286,21 +1240,21 @@ func WithCacheMaxAge(maxAge time.Duration) AuthorityOption {
 	}
 }
 
-// WithCacheMaxSize sets the maximum number of certificates to store in the cache.
+// WithCache sets the certificate cache used to store dynamically generated certificates.
 //
-// The default is 5 entries, and the size must be positive: [New] returns an
-// error otherwise. It governs the cache used by the SNI-driven
-// [CertificateAuthority.NewTLSConfig] path and
-// [CertificateAuthority.TLSCertificate].
+// Caching is opt-in: when unset (nil), certificates are regenerated per request. The cache
+// stores certificates keyed by normalized hostname and is consulted by the SNI-driven
+// [CertificateAuthority.NewTLSConfig] path and [CertificateAuthority.TLSCertificate];
+// see [cache.NewInMemory] for a ready-made implementation.
 //
 // Parameters:
-//   - maxSize (int): The maximum number of cached certificates (e.g., 1024).
+//   - c (cache.CertificateCache): The certificate cache to use (e.g., from [cache.NewInMemory]).
 //
 // Returns:
-//   - (AuthorityOption): An AuthorityOption that updates the CacheMaxSize field of the options.
-func WithCacheMaxSize(maxSize int) AuthorityOption {
+//   - (AuthorityOption): An AuthorityOption that updates the Cache field of the options.
+func WithCache(c cache.CertificateCache) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
-		opts.CacheMaxSize = maxSize
+		opts.Cache = c
 	}
 }
 
@@ -1309,8 +1263,8 @@ func WithCacheMaxSize(maxSize int) AuthorityOption {
 // It verifies that the certificate is configured as a CA with valid basic constraints, is within
 // its validity period, has the necessary key usage for certificate signing, and that the private
 // key matches the certificate's public key (RSA, ECDSA, or Ed25519).
-// The cache is initialized with a default maximum age of 1 hour and maximum size of 5 entries, both of
-// which can be overridden via [AuthorityOption] options.
+// Caching of issued certificates is opt-in via [WithCache]; the cache maximum age defaults
+// to 1 hour and can be overridden via [WithCacheMaxAge].
 //
 // Parameters:
 //   - caCertificate (*x509.Certificate): A pointer to the X.509 CA certificate.
@@ -1412,8 +1366,7 @@ func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...Aut
 	}
 
 	opts := &certificateAuthorityOptions{
-		CacheMaxAge:  defaultCacheMaxAge,
-		CacheMaxSize: defaultCacheMaxSize,
+		CacheMaxAge: defaultCacheMaxAge,
 	}
 
 	for _, f := range ofs {
@@ -1426,18 +1379,11 @@ func New(caCertificate *x509.Certificate, caPrivateKey crypto.Signer, ofs ...Aut
 		return nil, err
 	}
 
-	if opts.CacheMaxSize <= 0 {
-		err = fmt.Errorf("invalid input, cache max size must be positive, got %d", opts.CacheMaxSize)
-
-		return nil, err
-	}
-
 	ca = &CertificateAuthority{
 		caCertificate:           caCertificate,
 		caCertificatePrivateKey: caPrivateKey,
-		cache:                   make(map[string]*tlsCertificateCacheEntry),
+		cache:                   opts.Cache,
 		cacheMaxAge:             opts.CacheMaxAge,
-		cacheMaxSize:            opts.CacheMaxSize,
 		inflight:                make(map[string]*inflightCall),
 	}
 

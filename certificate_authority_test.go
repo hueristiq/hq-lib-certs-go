@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hueristiq/hq-lib-certs-go/cache"
 )
 
 var testKeyTypes = []struct {
@@ -56,6 +58,42 @@ func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuth
 	require.NotNil(t, ca)
 
 	return ca
+}
+
+func mustNewInMemory(t *testing.T, maxSize int) (c *cache.InMemory) {
+	t.Helper()
+
+	c, err := cache.NewInMemory(maxSize)
+	require.NoError(t, err)
+
+	return c
+}
+
+type recordingCertificateCache struct {
+	mutex   sync.Mutex
+	entries map[string]*cache.CertificateCacheEntry
+	gets    int
+	sets    int
+}
+
+func (c *recordingCertificateCache) Get(host string) (entry *cache.CertificateCacheEntry, found bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.gets++
+
+	entry, found = c.entries[host]
+
+	return entry, found
+}
+
+func (c *recordingCertificateCache) Set(host string, entry *cache.CertificateCacheEntry) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.sets++
+
+	c.entries[host] = entry
 }
 
 func newTestCSR(t *testing.T, commonName string, dnsNames []string) (csr *x509.CertificateRequest) {
@@ -160,8 +198,7 @@ func TestNewSuccess(t *testing.T) {
 	require.NotNil(t, ca)
 
 	assert.Equal(t, time.Hour, ca.cacheMaxAge)
-	assert.Equal(t, 5, ca.cacheMaxSize)
-	assert.NotNil(t, ca.cache)
+	assert.Nil(t, ca.cache)
 	assert.NotNil(t, ca.inflight)
 
 	assert.Equal(t, caCertificate.Raw, ca.CACertificate().Raw)
@@ -235,8 +272,6 @@ func TestNewRejectsInvalidCacheOptions(t *testing.T) {
 	}{
 		{"zero cache max age", []AuthorityOption{WithCacheMaxAge(0)}, "cache max age must be positive"},
 		{"negative cache max age", []AuthorityOption{WithCacheMaxAge(-time.Hour)}, "cache max age must be positive"},
-		{"zero cache max size", []AuthorityOption{WithCacheMaxSize(0)}, "cache max size must be positive"},
-		{"negative cache max size", []AuthorityOption{WithCacheMaxSize(-1)}, "cache max size must be positive"},
 	}
 
 	for _, tt := range tests {
@@ -346,10 +381,9 @@ func TestNewFromPEM(t *testing.T) {
 		certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeED25519))
 		require.NoError(t, err)
 
-		ca, err := NewFromPEM(certificatePEM, privateKeyPEM, WithCacheMaxSize(3), WithCacheMaxAge(2*time.Minute))
+		ca, err := NewFromPEM(certificatePEM, privateKeyPEM, WithCacheMaxAge(2*time.Minute))
 		require.NoError(t, err)
 
-		assert.Equal(t, 3, ca.cacheMaxSize)
 		assert.Equal(t, 2*time.Minute, ca.cacheMaxAge)
 	})
 }
@@ -501,7 +535,7 @@ func TestTLSCertificateSuccess(t *testing.T) {
 func TestTLSCertificateCacheHit(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestAuthority(t)
+	ca := newTestAuthority(t, WithCache(mustNewInMemory(t, 8)))
 
 	first, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
@@ -515,7 +549,7 @@ func TestTLSCertificateCacheHit(t *testing.T) {
 func TestTLSCertificateNormalizesHostname(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestAuthority(t)
+	ca := newTestAuthority(t, WithCache(mustNewInMemory(t, 8)))
 
 	first, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
@@ -531,7 +565,7 @@ func TestTLSCertificateConcurrentSameHost(t *testing.T) {
 
 	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
 
-	ca, err := New(caCertificate, caPrivateKey)
+	ca, err := New(caCertificate, caPrivateKey, WithCache(mustNewInMemory(t, 16)))
 	require.NoError(t, err)
 
 	const goroutines = 16
@@ -571,29 +605,26 @@ func TestTLSCertificateConcurrentSameHost(t *testing.T) {
 			assert.Same(t, first, result.certificate)
 		}
 	}
-
-	ca.cacheMutex.RLock()
-	defer ca.cacheMutex.RUnlock()
-
-	assert.Len(t, ca.cache, 1)
 }
 
 func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestAuthority(t, WithCacheMaxAge(time.Minute))
+	certificateCache := mustNewInMemory(t, 2)
+
+	ca := newTestAuthority(t, WithCache(certificateCache), WithCacheMaxAge(time.Minute))
 
 	first, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
 
-	ca.cacheMutex.RLock()
-	entry, exists := ca.cache["example.com"]
-	ca.cacheMutex.RUnlock()
-	require.True(t, exists)
+	entry, found := certificateCache.Get("example.com")
+	require.True(t, found)
 
-	ca.cacheMutex.Lock()
-	entry.createdAt = time.Now().Add(-2 * time.Minute)
-	ca.cacheMutex.Unlock()
+	// Backdate the cached entry beyond the maximum cache age.
+	certificateCache.Set("example.com", &cache.CertificateCacheEntry{
+		Certificate: entry.Certificate,
+		CreatedAt:   time.Now().Add(-2 * time.Minute),
+	})
 
 	second, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
@@ -604,47 +635,23 @@ func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 func TestGetTLSCertificateRegeneratesWhenLeafExpired(t *testing.T) {
 	t.Parallel()
 
-	ca := newTestAuthority(t)
+	certificateCache := mustNewInMemory(t, 2)
+
+	ca := newTestAuthority(t, WithCache(certificateCache))
 
 	first, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
 
-	ca.cacheMutex.RLock()
-	entry, exists := ca.cache["example.com"]
-	ca.cacheMutex.RUnlock()
-	require.True(t, exists)
+	entry, found := certificateCache.Get("example.com")
+	require.True(t, found)
 
-	ca.cacheMutex.Lock()
-	entry.certificate.Leaf.NotAfter = time.Now().Add(-time.Hour)
-	ca.cacheMutex.Unlock()
+	// Expire the cached leaf: the entry must not be served even though it is fresh.
+	entry.Certificate.Leaf.NotAfter = time.Now().Add(-time.Hour)
 
 	second, err := ca.TLSCertificate("example.com")
 	require.NoError(t, err)
 
 	assert.NotSame(t, first, second)
-}
-
-func TestGetTLSCertificateEvictsToMaxSize(t *testing.T) {
-	t.Parallel()
-
-	ca := newTestAuthority(t, WithCacheMaxSize(2))
-
-	_, err := ca.TLSCertificate("a.example.com")
-	require.NoError(t, err)
-
-	_, err = ca.TLSCertificate("b.example.com")
-	require.NoError(t, err)
-
-	_, err = ca.TLSCertificate("c.example.com")
-	require.NoError(t, err)
-
-	ca.cacheMutex.RLock()
-	defer ca.cacheMutex.RUnlock()
-
-	assert.Len(t, ca.cache, 2)
-	assert.NotContains(t, ca.cache, "a.example.com")
-	assert.Contains(t, ca.cache, "b.example.com")
-	assert.Contains(t, ca.cache, "c.example.com")
 }
 
 func TestNewTLSConfigDefaults(t *testing.T) {
@@ -1638,14 +1645,14 @@ func TestIsCacheEntryValid(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		entry *tlsCertificateCacheEntry
+		entry *cache.CertificateCacheEntry
 		want  bool
 	}{
-		{"nil certificate", &tlsCertificateCacheEntry{certificate: nil, createdAt: now}, false},
-		{"nil leaf", &tlsCertificateCacheEntry{certificate: &tls.Certificate{}, createdAt: now}, false},
-		{"fresh entry", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, createdAt: now}, true},
-		{"entry older than max age", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, createdAt: now.Add(-2 * time.Hour)}, false},
-		{"expired leaf", &tlsCertificateCacheEntry{certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, createdAt: now}, false},
+		{"nil certificate", &cache.CertificateCacheEntry{Certificate: nil, CreatedAt: now}, false},
+		{"nil leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{}, CreatedAt: now}, false},
+		{"fresh entry", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now}, true},
+		{"entry older than max age", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now.Add(-2 * time.Hour)}, false},
+		{"expired leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, CreatedAt: now}, false},
 	}
 
 	for _, tt := range tests {
@@ -1657,35 +1664,38 @@ func TestIsCacheEntryValid(t *testing.T) {
 	}
 }
 
-func TestClearOldCacheEntries(t *testing.T) {
+func TestTLSCertificateRegeneratesWithoutCache(t *testing.T) {
 	t.Parallel()
 
-	t.Run("removes exactly the oldest entry", func(t *testing.T) {
-		t.Parallel()
+	ca := newTestAuthority(t)
 
-		ca := newTestAuthority(t)
+	first, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-		now := time.Now()
+	second, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-		ca.cache["oldest.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-3 * time.Hour)}
-		ca.cache["middle.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-2 * time.Hour)}
-		ca.cache["newest.example.com"] = &tlsCertificateCacheEntry{createdAt: now.Add(-time.Hour)}
+	assert.NotSame(t, first, second)
+}
 
-		ca.clearOldCacheEntries()
+func TestTLSCertificateServesFromCustomCache(t *testing.T) {
+	t.Parallel()
 
-		assert.Len(t, ca.cache, 2)
-		assert.NotContains(t, ca.cache, "oldest.example.com")
-		assert.Contains(t, ca.cache, "middle.example.com")
-		assert.Contains(t, ca.cache, "newest.example.com")
-	})
+	certificateCache := &recordingCertificateCache{entries: make(map[string]*cache.CertificateCacheEntry)}
 
-	t.Run("empty cache is a safe no-op", func(t *testing.T) {
-		t.Parallel()
+	ca := newTestAuthority(t, WithCache(certificateCache))
 
-		ca := newTestAuthority(t)
+	first, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-		ca.clearOldCacheEntries()
+	second, err := ca.TLSCertificate("example.com")
+	require.NoError(t, err)
 
-		assert.Empty(t, ca.cache)
-	})
+	assert.Same(t, first, second)
+
+	certificateCache.mutex.Lock()
+	defer certificateCache.mutex.Unlock()
+
+	assert.Equal(t, 2, certificateCache.gets)
+	assert.Equal(t, 1, certificateCache.sets)
 }
