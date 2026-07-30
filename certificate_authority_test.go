@@ -1,4 +1,4 @@
-package certs
+package tls
 
 import (
 	"crypto"
@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hueristiq/hq-lib-certs-go/cache"
+	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 var testKeyTypes = []struct {
@@ -60,10 +60,10 @@ func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuth
 	return ca
 }
 
-func mustNewInMemory(t *testing.T, maxSize int) (c *cache.InMemory) {
+func mustNewInMemory(t *testing.T, maxSize int) (c *hqgotlscache.InMemory) {
 	t.Helper()
 
-	c, err := cache.NewInMemory(maxSize)
+	c, err := hqgotlscache.NewInMemory(maxSize)
 	require.NoError(t, err)
 
 	return c
@@ -71,12 +71,12 @@ func mustNewInMemory(t *testing.T, maxSize int) (c *cache.InMemory) {
 
 type recordingCertificateCache struct {
 	mutex   sync.Mutex
-	entries map[string]*cache.CertificateCacheEntry
+	entries map[string]*hqgotlscache.CertificateCacheEntry
 	gets    int
 	sets    int
 }
 
-func (c *recordingCertificateCache) Get(host string) (entry *cache.CertificateCacheEntry, found bool) {
+func (c *recordingCertificateCache) Get(host string) (entry *hqgotlscache.CertificateCacheEntry, found bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -87,7 +87,7 @@ func (c *recordingCertificateCache) Get(host string) (entry *cache.CertificateCa
 	return entry, found
 }
 
-func (c *recordingCertificateCache) Set(host string, entry *cache.CertificateCacheEntry) {
+func (c *recordingCertificateCache) Set(host string, entry *hqgotlscache.CertificateCacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -621,7 +621,7 @@ func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 	require.True(t, found)
 
 	// Backdate the cached entry beyond the maximum cache age.
-	certificateCache.Set("example.com", &cache.CertificateCacheEntry{
+	certificateCache.Set("example.com", &hqgotlscache.CertificateCacheEntry{
 		Certificate: entry.Certificate,
 		CreatedAt:   time.Now().Add(-2 * time.Minute),
 	})
@@ -1645,14 +1645,14 @@ func TestIsCacheEntryValid(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		entry *cache.CertificateCacheEntry
+		entry *hqgotlscache.CertificateCacheEntry
 		want  bool
 	}{
-		{"nil certificate", &cache.CertificateCacheEntry{Certificate: nil, CreatedAt: now}, false},
-		{"nil leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{}, CreatedAt: now}, false},
-		{"fresh entry", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now}, true},
-		{"entry older than max age", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now.Add(-2 * time.Hour)}, false},
-		{"expired leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, CreatedAt: now}, false},
+		{"nil certificate", &hqgotlscache.CertificateCacheEntry{Certificate: nil, CreatedAt: now}, false},
+		{"nil leaf", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{}, CreatedAt: now}, false},
+		{"fresh entry", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now}, true},
+		{"entry older than max age", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now.Add(-2 * time.Hour)}, false},
+		{"expired leaf", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, CreatedAt: now}, false},
 	}
 
 	for _, tt := range tests {
@@ -1681,7 +1681,7 @@ func TestTLSCertificateRegeneratesWithoutCache(t *testing.T) {
 func TestTLSCertificateServesFromCustomCache(t *testing.T) {
 	t.Parallel()
 
-	certificateCache := &recordingCertificateCache{entries: make(map[string]*cache.CertificateCacheEntry)}
+	certificateCache := &recordingCertificateCache{entries: make(map[string]*hqgotlscache.CertificateCacheEntry)}
 
 	ca := newTestAuthority(t, WithCache(certificateCache))
 

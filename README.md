@@ -1,8 +1,8 @@
-# hq-lib-certs-go
+# hq-lib-tls-go
 
-![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md)
+![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-tls-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-tls-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-tls-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-tls-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-tls-go/blob/main/CONTRIBUTING.md)
 
-`hq-lib-certs-go` is a [Go](https://golang.org/) package for generating, managing, and signing X.509 certificates.
+`hq-lib-tls-go` is a [Go](https://golang.org/) package for generating, managing, and signing X.509 certificates.
 
 ## Resources
 
@@ -27,18 +27,18 @@
 
 ## Installation
 
-To install `hq-lib-certs-go`, run the following command in your Go project:
+To install `hq-lib-tls-go`, run the following command in your Go project:
 
 ```bash
-go get -v -u github.com/hueristiq/hq-lib-certs-go
+go get -v -u github.com/hueristiq/hq-lib-tls-go
 ```
 
 ## Usage
 
-The examples below import the package under the `hqgocerts` alias.
+The examples below import the package under the `hqgotls` alias.
 
 ```go
-import hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+import hqgotls "github.com/hueristiq/hq-lib-tls-go"
 ```
 
 ### Generating a CA Certificate
@@ -52,22 +52,22 @@ import (
 	"log"
 	"time"
 
-	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Generate a CA certificate with custom options.
-	caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
-		hqgocerts.WithCACommonName("My Root CA"),
-		hqgocerts.WithCAOrganization([]string{"My Company"}),
-		hqgocerts.WithCAValidFor(365*24*time.Hour),
+	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+		hqgotls.WithCACommonName("My Root CA"),
+		hqgotls.WithCAOrganization([]string{"My Company"}),
+		hqgotls.WithCAValidFor(365*24*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Save to PEM files.
-	if err = hqgocerts.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
+	if err = hqgotls.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
 		log.Fatalf("Failed to save CA certificate: %v", err)
 	}
 
@@ -80,9 +80,9 @@ func main() {
 Pass `WithCAKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
 
 ```go
-caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
-	hqgocerts.WithCACommonName("My Root CA"),
-	hqgocerts.WithCAKeyType(hqgocerts.KeyTypeECDSAP256),
+caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+	hqgotls.WithCACommonName("My Root CA"),
+	hqgotls.WithCAKeyType(hqgotls.KeyTypeECDSAP256),
 )
 ```
 
@@ -98,11 +98,11 @@ package main
 import (
 	"log"
 
-	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
-	caCert, caKey, err := hqgocerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
@@ -116,7 +116,7 @@ func main() {
 When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewFromPEM`.
 
 ```go
-ca, err := hqgocerts.NewFromPEM(caCertPEM, caKeyPEM)
+ca, err := hqgotls.NewFromPEM(caCertPEM, caKeyPEM)
 if err != nil {
 	log.Fatalf("Failed to initialize CA: %v", err)
 }
@@ -133,18 +133,18 @@ import (
 	"log"
 	"time"
 
-	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Load CA certificate and private key.
-	caCert, caKey, err := hqgocerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
 	// Initialize the CertificateAuthority.
-	ca, err := hqgocerts.New(caCert, caKey)
+	ca, err := hqgotls.New(caCert, caKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
 	}
@@ -152,16 +152,16 @@ func main() {
 	// Generate a TLS certificate for multiple hosts.
 	tlsCert, tlsKey, err := ca.GenerateTLSCertificate(
 		[]string{"example.com", "www.example.com", "192.168.1.1", "user@example.com"},
-		hqgocerts.WithTLSCommonName("example.com"),
-		hqgocerts.WithTLSOrganization([]string{"My Company"}),
-		hqgocerts.WithTLSValidFor(30*24*time.Hour), // 30 days
+		hqgotls.WithTLSCommonName("example.com"),
+		hqgotls.WithTLSOrganization([]string{"My Company"}),
+		hqgotls.WithTLSValidFor(30*24*time.Hour), // 30 days
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate TLS certificate: %v", err)
 	}
 
 	// Save the TLS certificate and key.
-	if err := hqgocerts.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
+	if err := hqgotls.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
 		log.Fatalf("Failed to save TLS certificate: %v", err)
 	}
 
@@ -174,7 +174,7 @@ Certificates default to server authentication. To issue a client certificate for
 ```go
 clientCert, clientKey, err := ca.GenerateTLSCertificate(
 	[]string{"client.example.com"},
-	hqgocerts.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
+	hqgotls.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
 )
 ```
 
@@ -194,28 +194,28 @@ import (
 	"net/http"
 	"time"
 
-	hqgocerts "github.com/hueristiq/hq-lib-certs-go"
-	hqgocertscache "github.com/hueristiq/hq-lib-certs-go/cache"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 func main() {
 	// Generate or load the CA certificate and key.
-	caCert, caKey, err := hqgocerts.GenerateCACertificatePrivateKey(
-		hqgocerts.WithCACommonName("My Root CA"),
+	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+		hqgotls.WithCACommonName("My Root CA"),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Initialize the certificate cache and the CertificateAuthority.
-	certificateCache, err := hqgocertscache.NewInMemory(1024)
+	certificateCache, err := hqgotlscache.NewInMemory(1024)
 	if err != nil {
 		log.Fatalf("Failed to initialize certificate cache: %v", err)
 	}
 
-	ca, err := hqgocerts.New(caCert, caKey,
-		hqgocerts.WithCache(certificateCache),
-		hqgocerts.WithCacheMaxAge(6*time.Hour),
+	ca, err := hqgotls.New(caCert, caKey,
+		hqgotls.WithCache(certificateCache),
+		hqgotls.WithCacheMaxAge(6*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
@@ -244,12 +244,12 @@ Because the certificates are signed by a self-signed CA, clients must trust `caC
 
 ## Contributing
 
-Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-certs-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-certs-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-certs-go/blob/main/CONTRIBUTING.md).
+Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-tls-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-tls-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-tls-go/blob/main/CONTRIBUTING.md).
 
-A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-certs-go/graphs/contributors) for your ongoing support!
+A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-tls-go/graphs/contributors) for your ongoing support!
 
-![contributors](https://contrib.rocks/image?repo=hueristiq/hq-lib-certs-go&max=500)
+![contributors](https://contrib.rocks/image?repo=hueristiq/hq-lib-tls-go&max=500)
 
 ## Licensing
 
-This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-certs-go/blob/main/LICENSE).
+This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-tls-go/blob/main/LICENSE).

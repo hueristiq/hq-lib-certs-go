@@ -1,4 +1,4 @@
-// Package certs generates, manages, and signs X.509 certificates for building TLS
+// Package tls generates, manages, and signs X.509 certificates for building TLS
 // servers with dynamic, per-host certificate issuance.
 //
 // The package offers two complementary capabilities:
@@ -35,15 +35,15 @@
 // Generate a CA, wrap it in an authority, and serve TLS with SNI-driven
 // certificates:
 //
-//	caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-//		certs.WithCACommonName("Example Root CA"),
-//		certs.WithCAKeyType(certs.KeyTypeECDSAP256),
+//	caCert, caKey, err := tls.GenerateCACertificatePrivateKey(
+//		tls.WithCACommonName("Example Root CA"),
+//		tls.WithCAKeyType(tls.KeyTypeECDSAP256),
 //	)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
 //
-//	authority, err := certs.New(caCert, caKey)
+//	authority, err := tls.New(caCert, caKey)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -67,4 +67,4 @@
 // the HTTP/2 and HTTP/1.1 ALPN protocols (overridable with
 // [WithNextProtos]). A [CertificateAuthority] is safe for concurrent
 // use by multiple goroutines.
-package certs
+package tls

@@ -1,4 +1,4 @@
-package certs
+package tls
 
 import (
 	"crypto"
@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/hueristiq/hq-lib-certs-go/cache"
+	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 // caCertificatePrivateKeyOptions defines configuration options for generating a CA certificate and private key pair.
@@ -81,7 +81,7 @@ type CAOption func(opts *caCertificatePrivateKeyOptions)
 
 // A CertificateAuthority generates and signs TLS certificates from a single CA certificate and
 // its private key. It issues certificates dynamically for the hostname requested via Server Name
-// Indication (SNI). Caching of issued certificates is opt-in: pass a [cache.CertificateCache]
+// Indication (SNI). Caching of issued certificates is opt-in: pass a [hqgotlscache.CertificateCache]
 // via [WithCache] to reuse certificates across requests, or leave it unset (nil cache) to
 // regenerate a certificate on every request.
 //
@@ -96,7 +96,7 @@ type CAOption func(opts *caCertificatePrivateKeyOptions)
 // Fields:
 //   - caCertificate (*x509.Certificate): The CA certificate used to sign issued certificates.
 //   - caCertificatePrivateKey (crypto.Signer): The private key corresponding to the CA certificate.
-//   - cache (cache.CertificateCache): The cache of generated certificates, keyed by normalized hostname; nil disables caching.
+//   - cache (hqgotlscache.CertificateCache): The cache of generated certificates, keyed by normalized hostname; nil disables caching.
 //   - cacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued.
 //   - inflightMutex (sync.Mutex): Guards inflight.
 //   - inflight (map[string]*inflightCall): In-progress certificate generations, keyed by normalized hostname.
@@ -104,7 +104,7 @@ type CertificateAuthority struct {
 	caCertificate           *x509.Certificate
 	caCertificatePrivateKey crypto.Signer
 
-	cache       cache.CertificateCache
+	cache       hqgotlscache.CertificateCache
 	cacheMaxAge time.Duration
 
 	inflightMutex sync.Mutex
@@ -717,7 +717,7 @@ func (ca *CertificateAuthority) generateAndCacheTLSCertificate(host string) (cer
 	}
 
 	if ca.cache != nil {
-		ca.cache.Set(host, &cache.CertificateCacheEntry{
+		ca.cache.Set(host, &hqgotlscache.CertificateCacheEntry{
 			Certificate: certificate,
 			CreatedAt:   time.Now(),
 		})
@@ -730,11 +730,11 @@ func (ca *CertificateAuthority) generateAndCacheTLSCertificate(host string) (cer
 // than the configured maximum age and the certificate itself must not have expired.
 //
 // Parameters:
-//   - entry (*cache.CertificateCacheEntry): The cache entry to validate.
+//   - entry (*hqgotlscache.CertificateCacheEntry): The cache entry to validate.
 //
 // Returns:
 //   - valid (bool): True if the entry may be served to clients; otherwise, false.
-func (ca *CertificateAuthority) isCacheEntryValid(entry *cache.CertificateCacheEntry) (valid bool) {
+func (ca *CertificateAuthority) isCacheEntryValid(entry *hqgotlscache.CertificateCacheEntry) (valid bool) {
 	if entry.Certificate == nil || entry.Certificate.Leaf == nil {
 		return false
 	}
@@ -1206,10 +1206,10 @@ func WithTLSExtKeyUsage(usages ...x509.ExtKeyUsage) TLSOption {
 // This struct is used internally to configure the optional certificate cache.
 //
 // Fields:
-//   - Cache (cache.CertificateCache): The cache for generated certificates; nil by default, meaning certificates are regenerated per request.
+//   - Cache (hqgotlscache.CertificateCache): The cache for generated certificates; nil by default, meaning certificates are regenerated per request.
 //   - CacheMaxAge (time.Duration): The maximum age of a cached certificate before it is re-issued; defaults to 1 hour and must be positive.
 type certificateAuthorityOptions struct {
-	Cache       cache.CertificateCache
+	Cache       hqgotlscache.CertificateCache
 	CacheMaxAge time.Duration
 }
 
@@ -1245,14 +1245,14 @@ func WithCacheMaxAge(maxAge time.Duration) AuthorityOption {
 // Caching is opt-in: when unset (nil), certificates are regenerated per request. The cache
 // stores certificates keyed by normalized hostname and is consulted by the SNI-driven
 // [CertificateAuthority.NewTLSConfig] path and [CertificateAuthority.TLSCertificate];
-// see [cache.NewInMemory] for a ready-made implementation.
+// see [hqgotlscache.NewInMemory] for a ready-made implementation.
 //
 // Parameters:
-//   - c (cache.CertificateCache): The certificate cache to use (e.g., from [cache.NewInMemory]).
+//   - c (hqgotlscache.CertificateCache): The certificate cache to use (e.g., from [hqgotlscache.NewInMemory]).
 //
 // Returns:
 //   - (AuthorityOption): An AuthorityOption that updates the Cache field of the options.
-func WithCache(c cache.CertificateCache) AuthorityOption {
+func WithCache(c hqgotlscache.CertificateCache) AuthorityOption {
 	return func(opts *certificateAuthorityOptions) {
 		opts.Cache = c
 	}
