@@ -4,13 +4,16 @@
 // The package offers two complementary capabilities:
 //
 //   - One-off generation. [GenerateCACertificatePrivateKey] produces a
-//     self-signed Certificate Authority (CA), and
-//     [CertificateAuthority.GenerateTLSCertificate] issues a leaf certificate
-//     signed by that CA. PEM helpers ([CertificateToPEM], [PrivateKeyToPEM])
-//     and file helpers ([SaveCertificatePrivateKeyToFiles],
+//     self-signed Certificate Authority (CA) —
+//     [GenerateCACertificatePrivateKeyPEM] returns the same pair PEM-encoded —
+//     and [CertificateAuthority.GenerateTLSCertificate] issues a leaf
+//     certificate signed by that CA. PEM helpers ([CertificateToPEM],
+//     [PrivateKeyToPEM]) and file helpers ([SaveCertificatePrivateKeyToFiles],
 //     [LoadCertificatePrivateKeyFromFiles]) move certificates to and from disk.
 //   - A long-lived signing authority. [CertificateAuthority] issues leaf
-//     certificates on demand, optionally caching them via [WithCache]. Its
+//     certificates on demand, optionally caching them via [WithCache] for at
+//     most [WithCacheMaxAge]. Construct one with [New], or with [NewFromPEM]
+//     when the CA pair is stored as PEM. Its
 //     [CertificateAuthority.NewTLSConfig]
 //     returns a [crypto/tls.Config] whose GetCertificate hook mints a
 //     certificate for the hostname a client requests via Server Name Indication

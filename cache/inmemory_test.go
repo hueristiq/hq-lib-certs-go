@@ -74,7 +74,6 @@ func TestInMemoryEvictsOldestEntryWhenFull(t *testing.T) {
 	c.Set("oldest.example.com", &CertificateCacheEntry{CreatedAt: now.Add(-3 * time.Hour)})
 	c.Set("newest.example.com", &CertificateCacheEntry{CreatedAt: now.Add(-time.Hour)})
 
-	// The cache is full: storing a new host evicts the entry with the earliest CreatedAt.
 	c.Set("added.example.com", &CertificateCacheEntry{CreatedAt: now})
 
 	_, found := c.Get("oldest.example.com")
@@ -115,9 +114,6 @@ func TestInMemorySetExistingHostOverwritesWithoutEviction(t *testing.T) {
 		CreatedAt:   now,
 	}
 
-	// The cache is full, but storing an existing host replaces the entry in
-	// place: no eviction runs, so b.example.com survives even though the
-	// replaced entry was the oldest.
 	c.Set("a.example.com", replacement)
 
 	got, found := c.Get("a.example.com")

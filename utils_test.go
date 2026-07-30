@@ -3,6 +3,8 @@ package tls
 import (
 	"crypto"
 	"crypto/x509"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,18 @@ func expectedWritePerm() os.FileMode {
 	}
 
 	return 0o600
+}
+
+type publicKeySigner struct {
+	publicKey crypto.PublicKey
+}
+
+func (s publicKeySigner) Public() crypto.PublicKey {
+	return s.publicKey
+}
+
+func (publicKeySigner) Sign(_ io.Reader, _ []byte, _ crypto.SignerOpts) ([]byte, error) {
+	return nil, errors.New("publicKeySigner does not sign")
 }
 
 func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
@@ -94,6 +108,8 @@ func TestSaveCertificatePrivateKeyToFilesValidation(t *testing.T) {
 		{"empty certificate file path", caCertificate, caPrivateKey, "", privateKeyFilePath, "certificate file path or private key file path is empty"},
 		{"empty private key file path", caCertificate, caPrivateKey, certificateFilePath, "", "certificate file path or private key file path is empty"},
 		{"mismatched private key", caCertificate, otherPrivateKey, certificateFilePath, privateKeyFilePath, "does not match the certificate's public key"},
+		{"certificate public key cannot be marshaled", &x509.Certificate{PublicKey: "unsupported"}, caPrivateKey, certificateFilePath, privateKeyFilePath, "certificate public key"},
+		{"private key public key cannot be marshaled", caCertificate, fakeSigner{}, certificateFilePath, privateKeyFilePath, "private key's public key"},
 	}
 
 	for _, tt := range tests {
@@ -322,4 +338,100 @@ func TestWriteToFile(t *testing.T) {
 		err := writeToFile([]byte("content"), filepath.Join(t.TempDir(), "missing", "file.txt"))
 		require.ErrorContains(t, err, "writing content to file")
 	})
+}
+
+func TestSaveCertificatePrivateKeyToFilesPEMConversionErrors(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
+
+	t.Run("certificate has no raw data", func(t *testing.T) {
+		t.Parallel()
+
+		certificate := &x509.Certificate{PublicKey: caCertificate.PublicKey}
+
+		err := SaveCertificatePrivateKeyToFiles(certificate, caPrivateKey, filepath.Join(t.TempDir(), "ca.crt"), filepath.Join(t.TempDir(), "ca.key"))
+		require.ErrorContains(t, err, "converting certificate to PEM format")
+	})
+
+	t.Run("private key type unsupported for PEM encoding", func(t *testing.T) {
+		t.Parallel()
+
+		privateKey := publicKeySigner{publicKey: caCertificate.PublicKey}
+
+		err := SaveCertificatePrivateKeyToFiles(caCertificate, privateKey, filepath.Join(t.TempDir(), "ca.crt"), filepath.Join(t.TempDir(), "ca.key"))
+		require.ErrorContains(t, err, "converting private key to PEM format")
+	})
+}
+
+func TestSaveCertificatePrivateKeyToFilesFilesystemErrors(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+
+	tests := []struct {
+		name        string
+		paths       func(t *testing.T, dir string) (certificateFilePath, privateKeyFilePath string)
+		errContains string
+	}{
+		{
+			name: "certificate directory cannot be created",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				blocker := filepath.Join(dir, "blocker")
+				require.NoError(t, os.WriteFile(blocker, []byte("file"), 0o600))
+
+				return filepath.Join(blocker, "ca.crt"), filepath.Join(dir, "ca.key")
+			},
+			errContains: "for certificate",
+		},
+		{
+			name: "private key directory cannot be created",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				blocker := filepath.Join(dir, "blocker")
+				require.NoError(t, os.WriteFile(blocker, []byte("file"), 0o600))
+
+				return filepath.Join(dir, "ca.crt"), filepath.Join(blocker, "ca.key")
+			},
+			errContains: "for private key",
+		},
+		{
+			name: "certificate file path is a directory",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				certificateFilePath := filepath.Join(dir, "certs")
+				require.NoError(t, os.MkdirAll(certificateFilePath, 0o750))
+
+				return certificateFilePath, filepath.Join(dir, "ca.key")
+			},
+			errContains: "writing certificate to file",
+		},
+		{
+			name: "private key file path is a directory",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				privateKeyFilePath := filepath.Join(dir, "keys")
+				require.NoError(t, os.MkdirAll(privateKeyFilePath, 0o750))
+
+				return filepath.Join(dir, "ca.crt"), privateKeyFilePath
+			},
+			errContains: "writing private key to file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			certificateFilePath, privateKeyFilePath := tt.paths(t, t.TempDir())
+
+			err := SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, certificateFilePath, privateKeyFilePath)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
 }

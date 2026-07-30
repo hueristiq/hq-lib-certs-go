@@ -2,6 +2,7 @@ package tls
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -14,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/url"
 	"sync"
@@ -212,6 +214,8 @@ func TestNewValidation(t *testing.T) {
 	ecdsaCertificate, ecdsaPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
 	ed25519Certificate, ed25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
 
+	_, otherRSAPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
+	_, otherECDSAPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
 	_, otherEd25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
 
 	authority, err := New(ecdsaCertificate, ecdsaPrivateKey)
@@ -245,7 +249,9 @@ func TestNewValidation(t *testing.T) {
 		{"RSA certificate with ECDSA private key", rsaCertificate, ecdsaPrivateKey, "certificate public key is RSA, but private key is"},
 		{"ECDSA certificate with Ed25519 private key", ecdsaCertificate, ed25519PrivateKey, "certificate public key is ECDSA, but private key is"},
 		{"Ed25519 certificate with RSA private key", ed25519Certificate, rsaPrivateKey, "certificate public key is Ed25519, but private key is"},
-		{"private key does not match public key", ed25519Certificate, otherEd25519PrivateKey, "does not match the certificate's public key"},
+		{"RSA private key does not match public key", rsaCertificate, otherRSAPrivateKey, "does not match the certificate's public key"},
+		{"ECDSA private key does not match public key", ecdsaCertificate, otherECDSAPrivateKey, "does not match the certificate's public key"},
+		{"Ed25519 private key does not match public key", ed25519Certificate, otherEd25519PrivateKey, "does not match the certificate's public key"},
 		{"unsupported public key type", unsupportedPublicKeyCertificate, ed25519PrivateKey, "unsupported certificate public key type"},
 	}
 
@@ -399,6 +405,17 @@ func TestNewFromPEMValidation(t *testing.T) {
 
 	garbageCertificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
 	unsupportedKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: []byte("not a private key")})
+	garbageRSAKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: []byte("not a private key")})
+	garbageECKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("not a private key")})
+	garbagePKCS8KeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a private key")})
+
+	x25519PrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	x25519DER, err := x509.MarshalPKCS8PrivateKey(x25519PrivateKey)
+	require.NoError(t, err)
+
+	x25519KeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x25519DER})
 
 	tests := []struct {
 		name           string
@@ -413,6 +430,10 @@ func TestNewFromPEMValidation(t *testing.T) {
 		{"unparseable certificate DER", garbageCertificatePEM, privateKeyPEM, "parsing X.509 certificate from PEM data"},
 		{"malformed private key PEM", certificatePEM, []byte("not pem"), "decoding PEM block for private key"},
 		{"unsupported private key block type", certificatePEM, unsupportedKeyPEM, "unsupported PEM block type for private key"},
+		{"unparseable RSA private key DER", certificatePEM, garbageRSAKeyPEM, "parsing RSA private key from PEM data"},
+		{"unparseable ECDSA private key DER", certificatePEM, garbageECKeyPEM, "parsing ECDSA private key from PEM data"},
+		{"unparseable PKCS#8 private key DER", certificatePEM, garbagePKCS8KeyPEM, "parsing PKCS#8 private key from PEM data"},
+		{"PKCS#8 private key is not a crypto.Signer", certificatePEM, x25519KeyPEM, "does not implement crypto.Signer"},
 		{"mismatched certificate and key", certificatePEM, otherPrivateKeyPEM, "does not match the certificate's public key"},
 	}
 
@@ -620,7 +641,6 @@ func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 	entry, found := certificateCache.Get("example.com")
 	require.True(t, found)
 
-	// Backdate the cached entry beyond the maximum cache age.
 	certificateCache.Set("example.com", &hqgotlscache.CertificateCacheEntry{
 		Certificate: entry.Certificate,
 		CreatedAt:   time.Now().Add(-2 * time.Minute),
@@ -645,7 +665,6 @@ func TestGetTLSCertificateRegeneratesWhenLeafExpired(t *testing.T) {
 	entry, found := certificateCache.Get("example.com")
 	require.True(t, found)
 
-	// Expire the cached leaf: the entry must not be served even though it is fresh.
 	entry.Certificate.Leaf.NotAfter = time.Now().Add(-time.Hour)
 
 	second, err := ca.TLSCertificate("example.com")
@@ -712,6 +731,13 @@ func TestNewTLSConfigWithHostFallback(t *testing.T) {
 	require.NotNil(t, certificate.Leaf)
 
 	assert.Contains(t, certificate.Leaf.DNSNames, "other.example.com")
+
+	_, err = config.GetCertificate(nil)
+	require.ErrorContains(t, err, "ClientHelloInfo is nil")
+
+	configWithOption := ca.NewTLSConfigWithHost("fallback.example.com", WithNextProtos("acme/1"))
+	require.NotNil(t, configWithOption)
+	assert.Equal(t, []string{"acme/1"}, configWithOption.NextProtos)
 }
 
 func TestTLSConfigNilCA(t *testing.T) {
@@ -914,6 +940,26 @@ func TestGenerateTLSCertificateValidation(t *testing.T) {
 
 	ca := newTestAuthority(t)
 
+	unsupportedKeyAuthority := &CertificateAuthority{
+		caCertificate:           &x509.Certificate{},
+		caCertificatePrivateKey: fakeSigner{},
+	}
+
+	tinyRSAKeyAuthority := &CertificateAuthority{
+		caCertificate: &x509.Certificate{},
+		caCertificatePrivateKey: &rsa.PrivateKey{
+			PublicKey: rsa.PublicKey{N: big.NewInt(143), E: 3},
+		},
+	}
+
+	nilCurveAuthority := &CertificateAuthority{
+		caCertificate: &x509.Certificate{},
+		caCertificatePrivateKey: &ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{X: big.NewInt(1), Y: big.NewInt(1)},
+			D:         big.NewInt(1),
+		},
+	}
+
 	tests := []struct {
 		name        string
 		ca          *CertificateAuthority
@@ -927,6 +973,9 @@ func TestGenerateTLSCertificateValidation(t *testing.T) {
 		{"empty hostname in hosts list", ca, []string{""}, nil, "empty hostname in hosts list"},
 		{"empty common name", ca, []string{"example.com"}, []TLSOption{WithTLSCommonName("")}, "CommonName is empty"},
 		{"non-positive validity duration", ca, []string{"example.com"}, []TLSOption{WithTLSValidFor(0)}, "ValidFor duration must be positive"},
+		{"unsupported CA private key type", unsupportedKeyAuthority, []string{"example.com"}, nil, "unsupported CA private key type"},
+		{"RSA CA key too small to derive leaf key", tinyRSAKeyAuthority, []string{"example.com"}, nil, "generating RSA private key"},
+		{"ECDSA CA key with nil curve", nilCurveAuthority, []string{"example.com"}, nil, "creating TLS certificate"},
 	}
 
 	for _, tt := range tests {
@@ -1498,6 +1547,7 @@ func TestPrivateKeyToPEMValidation(t *testing.T) {
 	}{
 		{"nil private key", nil, "private key is nil"},
 		{"unsupported private key type", fakeSigner{}, "unsupported private key type"},
+		{"invalid ECDSA private key", &ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}, D: big.NewInt(1)}, "marshaling ECDSA private key"},
 	}
 
 	for _, tt := range tests {
@@ -1551,6 +1601,9 @@ func TestNormalizeHost(t *testing.T) {
 		{"uppercase hostname with port", "EXAMPLE.COM:443", "example.com"},
 		{"trailing dot", "example.com.", "example.com"},
 		{"trailing dot with port", "example.com.:443", "example.com"},
+		{"hostname with empty port", "example.com:", "example.com"},
+		{"hostname with non-numeric port", "example.com:https", "example.com"},
+		{"bare ipv6 address", "::1", "::1"},
 		{"NFD folded to NFC", "café.com", "café.com"},
 		{"NFD with port", "café.com:443", "café.com"},
 		{"ipv6 address with port", "[::1]:443", "::1"},
@@ -1633,6 +1686,13 @@ func TestGenerateSubjectKeyID(t *testing.T) {
 
 		_, err := generateSubjectKeyID(nil)
 		require.ErrorContains(t, err, "public key is nil")
+	})
+
+	t.Run("unsupported public key type", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := generateSubjectKeyID("not a public key")
+		require.ErrorContains(t, err, "marshaling public key")
 	})
 }
 
