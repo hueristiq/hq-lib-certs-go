@@ -20,10 +20,10 @@
 
 ## Features
 
-- **Self-Signed CA Generation:** Create CA certificates with customizable subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
-- **TLS Certificate Issuance:** Issue signed leaf certificates for DNS names, IP addresses, email addresses, and URIs, with configurable subject, validity, and extended key usage (server or client/mTLS). Leaf keys match the CA's algorithm — an RSA CA passes its key size on to the leaf, and an ECDSA CA passes on its curve.
-- **Dynamic TLS Configuration:** SNI-based certificate generation for TLS servers, with a minimum TLS version of 1.2 and ALPN protocols advertised for HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
-- **Opt-In Certificate Caching:** Pluggable caching of dynamically generated certificates via the `cache` package — pass a `cache.CertificateCache` (e.g., `cache.NewInMemory`) to `New` with `WithCache` and tune expiry with `WithCacheMaxAge`. Without a cache, certificates are regenerated per request.
+- **Self-Signed CA Generation:** Create CA certificates with custom subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
+- **TLS Certificate Issuance:** Issue leaf certificates for DNS names, IPs, emails, or URIs, with keys inheriting the CA's algorithm.
+- **Dynamic TLS Configuration:** SNI-driven per-host certificate generation, TLS 1.2 minimum, HTTP/2 and HTTP/1.1 ALPN.
+- **Opt-In Certificate Caching:** Pluggable caching via the `cache` package; without it, certificates are regenerated per request.
 
 ## Installation
 
@@ -35,10 +35,10 @@ go get -v -u github.com/hueristiq/hq-lib-tls-go
 
 ## Usage
 
-The examples below import the package under the `hqgotls` alias.
+The package is named `tlscerts` (it was formerly named `tls`); the module path is unchanged.
 
 ```go
-import hqgotls "github.com/hueristiq/hq-lib-tls-go"
+import "github.com/hueristiq/hq-lib-tls-go"
 ```
 
 ### Generating a CA Certificate
@@ -52,22 +52,22 @@ import (
 	"log"
 	"time"
 
-	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+	"github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Generate a CA certificate with custom options.
-	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
-		hqgotls.WithCACommonName("My Root CA"),
-		hqgotls.WithCAOrganization([]string{"My Company"}),
-		hqgotls.WithCAValidFor(365*24*time.Hour),
+	caCert, caKey, err := tlscerts.GenerateCACertificatePrivateKey(
+		tlscerts.WithCACommonName("My Root CA"),
+		tlscerts.WithCAOrganization([]string{"My Company"}),
+		tlscerts.WithCAValidFor(365*24*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Save to PEM files.
-	if err = hqgotls.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
+	if err = tlscerts.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
 		log.Fatalf("Failed to save CA certificate: %v", err)
 	}
 
@@ -80,13 +80,13 @@ func main() {
 Pass `WithCAKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
 
 ```go
-caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
-	hqgotls.WithCACommonName("My Root CA"),
-	hqgotls.WithCAKeyType(hqgotls.KeyTypeECDSAP256),
+caCert, caKey, err := tlscerts.GenerateCACertificatePrivateKey(
+	tlscerts.WithCACommonName("My Root CA"),
+	tlscerts.WithCAKeyType(tlscerts.KeyTypeECDSAP256),
 )
 ```
 
-Available key types: `KeyTypeRSA2048` (default), `KeyTypeECDSAP256`, and `KeyTypeED25519`.
+Available key types: `KeyTypeRSA2048` (default), `KeyTypeECDSAP256`, and `KeyTypeEd25519`.
 
 ### Loading a Certificate from Files
 
@@ -98,11 +98,11 @@ package main
 import (
 	"log"
 
-	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+	"github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
-	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := tlscerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
@@ -116,7 +116,7 @@ func main() {
 When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewFromPEM`.
 
 ```go
-ca, err := hqgotls.NewFromPEM(caCertPEM, caKeyPEM)
+ca, err := tlscerts.NewFromPEM(caCertPEM, caKeyPEM)
 if err != nil {
 	log.Fatalf("Failed to initialize CA: %v", err)
 }
@@ -133,18 +133,18 @@ import (
 	"log"
 	"time"
 
-	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+	"github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Load CA certificate and private key.
-	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := tlscerts.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
 	// Initialize the CertificateAuthority.
-	ca, err := hqgotls.New(caCert, caKey)
+	ca, err := tlscerts.New(caCert, caKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
 	}
@@ -152,16 +152,16 @@ func main() {
 	// Generate a TLS certificate for multiple hosts.
 	tlsCert, tlsKey, err := ca.GenerateTLSCertificate(
 		[]string{"example.com", "www.example.com", "192.168.1.1", "user@example.com"},
-		hqgotls.WithTLSCommonName("example.com"),
-		hqgotls.WithTLSOrganization([]string{"My Company"}),
-		hqgotls.WithTLSValidFor(30*24*time.Hour), // 30 days
+		tlscerts.WithTLSCommonName("example.com"),
+		tlscerts.WithTLSOrganization([]string{"My Company"}),
+		tlscerts.WithTLSValidFor(30*24*time.Hour), // 30 days
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate TLS certificate: %v", err)
 	}
 
 	// Save the TLS certificate and key.
-	if err := hqgotls.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
+	if err := tlscerts.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
 		log.Fatalf("Failed to save TLS certificate: %v", err)
 	}
 
@@ -174,13 +174,15 @@ Certificates default to server authentication. To issue a client certificate for
 ```go
 clientCert, clientKey, err := ca.GenerateTLSCertificate(
 	[]string{"client.example.com"},
-	hqgotls.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
+	tlscerts.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
 )
 ```
 
 ### Configuring a TLS Server with SNI
 
 `NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI. Caching is opt-in: pass a cache from the `cache` package to `New` via `WithCache` to reuse certificates across connections, and tune entry expiry with `WithCacheMaxAge`. Without a cache, a certificate is regenerated for every request.
+
+**Production use:** the cache is off by default — enable it with `WithCache(cache.NewInMemory(maxSize))`, sized to the number of distinct hosts served, and set `WithCacheMaxAge` well below the leaf validity (24 hours for SNI-driven issuance). For dynamic per-host issuance, consider `WithCAKeyType(KeyTypeECDSAP256)`: ECDSA-P256 leaf generation is markedly faster than RSA-2048.
 
 > **Breaking change:** previous versions cached by default and sized the cache with `WithCacheMaxSize`. That option has been removed — an authority created without `WithCache` regenerates a certificate per request, and cache sizing is now the cache implementation's concern (for example, `cache.NewInMemory(1024)`).
 
@@ -194,28 +196,28 @@ import (
 	"net/http"
 	"time"
 
-	hqgotls "github.com/hueristiq/hq-lib-tls-go"
-	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
+	"github.com/hueristiq/hq-lib-tls-go"
+	"github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 func main() {
 	// Generate or load the CA certificate and key.
-	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
-		hqgotls.WithCACommonName("My Root CA"),
+	caCert, caKey, err := tlscerts.GenerateCACertificatePrivateKey(
+		tlscerts.WithCACommonName("My Root CA"),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Initialize the certificate cache and the CertificateAuthority.
-	certificateCache, err := hqgotlscache.NewInMemory(1024)
+	certificateCache, err := cache.NewInMemory(1024)
 	if err != nil {
 		log.Fatalf("Failed to initialize certificate cache: %v", err)
 	}
 
-	ca, err := hqgotls.New(caCert, caKey,
-		hqgotls.WithCache(certificateCache),
-		hqgotls.WithCacheMaxAge(6*time.Hour),
+	ca, err := tlscerts.New(caCert, caKey,
+		tlscerts.WithCache(certificateCache),
+		tlscerts.WithCacheMaxAge(6*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)

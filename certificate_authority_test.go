@@ -1,4 +1,4 @@
-package tls
+package tlscerts
 
 import (
 	"crypto"
@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
+	"github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 var testKeyTypes = []struct {
@@ -34,7 +34,7 @@ var testKeyTypes = []struct {
 }{
 	{"rsa", KeyTypeRSA2048},
 	{"ecdsa", KeyTypeECDSAP256},
-	{"ed25519", KeyTypeED25519},
+	{"ed25519", KeyTypeEd25519},
 }
 
 func newTestCACertificatePrivateKey(t *testing.T, ofs ...CAOption) (certificate *x509.Certificate, privateKey crypto.Signer) {
@@ -62,10 +62,10 @@ func newTestAuthority(t *testing.T, ofs ...AuthorityOption) (ca *CertificateAuth
 	return ca
 }
 
-func mustNewInMemory(t *testing.T, maxSize int) (c *hqgotlscache.InMemory) {
+func mustNewInMemory(t *testing.T, maxSize int) (c *cache.InMemory) {
 	t.Helper()
 
-	c, err := hqgotlscache.NewInMemory(maxSize)
+	c, err := cache.NewInMemory(maxSize)
 	require.NoError(t, err)
 
 	return c
@@ -73,12 +73,12 @@ func mustNewInMemory(t *testing.T, maxSize int) (c *hqgotlscache.InMemory) {
 
 type recordingCertificateCache struct {
 	mutex   sync.Mutex
-	entries map[string]*hqgotlscache.CertificateCacheEntry
+	entries map[string]*cache.CertificateCacheEntry
 	gets    int
 	sets    int
 }
 
-func (c *recordingCertificateCache) Get(host string) (entry *hqgotlscache.CertificateCacheEntry, found bool) {
+func (c *recordingCertificateCache) Get(host string) (entry *cache.CertificateCacheEntry, found bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -89,7 +89,7 @@ func (c *recordingCertificateCache) Get(host string) (entry *hqgotlscache.Certif
 	return entry, found
 }
 
-func (c *recordingCertificateCache) Set(host string, entry *hqgotlscache.CertificateCacheEntry) {
+func (c *recordingCertificateCache) Set(host string, entry *cache.CertificateCacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -212,11 +212,11 @@ func TestNewValidation(t *testing.T) {
 
 	rsaCertificate, rsaPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
 	ecdsaCertificate, ecdsaPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
-	ed25519Certificate, ed25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	ed25519Certificate, ed25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	_, otherRSAPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
 	_, otherECDSAPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeECDSAP256))
-	_, otherEd25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	_, otherEd25519PrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	authority, err := New(ecdsaCertificate, ecdsaPrivateKey)
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestNewFromPEM(t *testing.T) {
 	t.Run("authority options forwarded", func(t *testing.T) {
 		t.Parallel()
 
-		certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeED25519))
+		certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeEd25519))
 		require.NoError(t, err)
 
 		ca, err := NewFromPEM(certificatePEM, privateKeyPEM, WithCacheMaxAge(2*time.Minute))
@@ -397,10 +397,10 @@ func TestNewFromPEM(t *testing.T) {
 func TestNewFromPEMValidation(t *testing.T) {
 	t.Parallel()
 
-	certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeED25519))
+	certificatePEM, privateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Test CA"), WithCAKeyType(KeyTypeEd25519))
 	require.NoError(t, err)
 
-	_, otherPrivateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Other CA"), WithCAKeyType(KeyTypeED25519))
+	_, otherPrivateKeyPEM, err := GenerateCACertificatePrivateKeyPEM(WithCACommonName("Other CA"), WithCAKeyType(KeyTypeEd25519))
 	require.NoError(t, err)
 
 	garbageCertificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
@@ -641,7 +641,7 @@ func TestGetTLSCertificateRegeneratesAfterExpiry(t *testing.T) {
 	entry, found := certificateCache.Get("example.com")
 	require.True(t, found)
 
-	certificateCache.Set("example.com", &hqgotlscache.CertificateCacheEntry{
+	certificateCache.Set("example.com", &cache.CertificateCacheEntry{
 		Certificate: entry.Certificate,
 		CreatedAt:   time.Now().Add(-2 * time.Minute),
 	})
@@ -871,7 +871,7 @@ func TestGenerateCACertificatePrivateKeyKeyTypes(t *testing.T) {
 	}{
 		{"rsa", KeyTypeRSA2048, &rsa.PrivateKey{}, x509.SHA256WithRSA},
 		{"ecdsa", KeyTypeECDSAP256, &ecdsa.PrivateKey{}, x509.ECDSAWithSHA256},
-		{"ed25519", KeyTypeED25519, ed25519.PrivateKey{}, x509.PureEd25519},
+		{"ed25519", KeyTypeEd25519, ed25519.PrivateKey{}, x509.PureEd25519},
 	}
 
 	for _, tt := range tests {
@@ -1060,7 +1060,7 @@ func TestGenerateTLSCertificateLeafKeyMatchesCAKeyType(t *testing.T) {
 				require.True(t, ok)
 
 				assert.Equal(t, caKey.Curve.Params().Name, leafKey.Curve.Params().Name)
-			case KeyTypeED25519:
+			case KeyTypeEd25519:
 				assert.IsType(t, ed25519.PrivateKey{}, privateKey)
 			default:
 				require.FailNow(t, "unhandled key type in test")
@@ -1705,14 +1705,14 @@ func TestIsCacheEntryValid(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		entry *hqgotlscache.CertificateCacheEntry
+		entry *cache.CertificateCacheEntry
 		want  bool
 	}{
-		{"nil certificate", &hqgotlscache.CertificateCacheEntry{Certificate: nil, CreatedAt: now}, false},
-		{"nil leaf", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{}, CreatedAt: now}, false},
-		{"fresh entry", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now}, true},
-		{"entry older than max age", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now.Add(-2 * time.Hour)}, false},
-		{"expired leaf", &hqgotlscache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, CreatedAt: now}, false},
+		{"nil certificate", &cache.CertificateCacheEntry{Certificate: nil, CreatedAt: now}, false},
+		{"nil leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{}, CreatedAt: now}, false},
+		{"fresh entry", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now}, true},
+		{"entry older than max age", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(time.Hour)}}, CreatedAt: now.Add(-2 * time.Hour)}, false},
+		{"expired leaf", &cache.CertificateCacheEntry{Certificate: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: now.Add(-time.Hour)}}, CreatedAt: now}, false},
 	}
 
 	for _, tt := range tests {
@@ -1741,7 +1741,7 @@ func TestTLSCertificateRegeneratesWithoutCache(t *testing.T) {
 func TestTLSCertificateServesFromCustomCache(t *testing.T) {
 	t.Parallel()
 
-	certificateCache := &recordingCertificateCache{entries: make(map[string]*hqgotlscache.CertificateCacheEntry)}
+	certificateCache := &recordingCertificateCache{entries: make(map[string]*cache.CertificateCacheEntry)}
 
 	ca := newTestAuthority(t, WithCache(certificateCache))
 
@@ -1756,6 +1756,98 @@ func TestTLSCertificateServesFromCustomCache(t *testing.T) {
 	certificateCache.mutex.Lock()
 	defer certificateCache.mutex.Unlock()
 
-	assert.Equal(t, 2, certificateCache.gets)
+	// The first call Gets twice (the initial miss and the re-check under the
+	// in-flight mutex before generation) and Sets once; the second call is a
+	// single cache hit.
+	assert.Equal(t, 3, certificateCache.gets)
 	assert.Equal(t, 1, certificateCache.sets)
+}
+
+func BenchmarkGetCertificateCacheHit(b *testing.B) {
+	caCertificate, caPrivateKey, err := GenerateCACertificatePrivateKey(
+		WithCACommonName("Benchmark CA"),
+		WithCAKeyType(KeyTypeECDSAP256),
+	)
+	require.NoError(b, err)
+
+	certificateCache, err := cache.NewInMemory(8)
+	require.NoError(b, err)
+
+	ca, err := New(caCertificate, caPrivateKey, WithCache(certificateCache))
+	require.NoError(b, err)
+
+	config := ca.NewTLSConfig()
+
+	hello := &tls.ClientHelloInfo{ServerName: "example.com"}
+
+	// Populate the cache so every GetCertificate below is a cache hit.
+	_, err = config.GetCertificate(hello)
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+
+	var certificate *tls.Certificate
+
+	for b.Loop() {
+		certificate, _ = config.GetCertificate(hello)
+	}
+
+	_ = certificate
+}
+
+func TestGetTLSCertificateLeaderPanicUnblocksWaiters(t *testing.T) {
+	t.Parallel()
+
+	// An Ed25519 private key with a bad length panics inside
+	// x509.CreateCertificate (its Public method reads priv[32:]), forcing the
+	// leader down the panic path without crashing the test process.
+	ca := &CertificateAuthority{
+		caCertificate:           &x509.Certificate{},
+		caCertificatePrivateKey: ed25519.PrivateKey{0x01, 0x02},
+	}
+
+	const goroutines = 8
+
+	errs := make(chan error, goroutines)
+
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+
+			_, err := ca.TLSCertificate("panic.example.com")
+			errs <- err
+		}()
+	}
+
+	waited := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(waited)
+	}()
+
+	select {
+	case <-waited:
+	case <-time.After(30 * time.Second):
+		t.Fatal("concurrent TLSCertificate calls deadlocked after the leader panicked")
+	}
+
+	close(errs)
+
+	for err := range errs {
+		require.ErrorContains(t, err, "panic while generating certificate")
+	}
+
+	// The panic must not poison the host: the in-flight entry is cleared, and a
+	// later call fails fast with the same error instead of blocking forever.
+	ca.inflightMutex.Lock()
+	assert.Empty(t, ca.inflight)
+	ca.inflightMutex.Unlock()
+
+	_, err := ca.TLSCertificate("panic.example.com")
+	require.ErrorContains(t, err, "panic while generating certificate")
 }

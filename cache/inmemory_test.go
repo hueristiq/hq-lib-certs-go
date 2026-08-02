@@ -2,6 +2,7 @@ package cache
 
 import (
 	"crypto/tls"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -151,4 +152,30 @@ func TestInMemoryConcurrentGetSet(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func BenchmarkInMemorySetEvict(b *testing.B) {
+	const maxSize = 1024
+
+	c, err := NewInMemory(maxSize)
+	require.NoError(b, err)
+
+	entry := &CertificateCacheEntry{
+		Certificate: &tls.Certificate{},
+		CreatedAt:   time.Now(),
+	}
+
+	// Fill the cache to capacity so every Set below evicts the oldest entry.
+	for i := range maxSize {
+		c.Set(strconv.Itoa(i)+".example.com", entry)
+	}
+
+	b.ReportAllocs()
+
+	i := maxSize
+
+	for b.Loop() {
+		c.Set(strconv.Itoa(i)+".example.com", entry)
+		i++
+	}
 }

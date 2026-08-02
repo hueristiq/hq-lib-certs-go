@@ -1,4 +1,4 @@
-// Package tls generates, manages, and signs X.509 certificates for building TLS
+// Package tlscerts generates, manages, and signs X.509 certificates for building TLS
 // servers with dynamic, per-host certificate issuance.
 //
 // The package offers two complementary capabilities:
@@ -25,6 +25,16 @@
 //     TLS-intercepting proxies and multi-tenant servers that cannot enumerate
 //     their hostnames in advance.
 //
+// # Production use
+//
+// The certificate cache is off by default: an authority created without
+// [WithCache] regenerates a certificate on every request. Enable caching with
+// [WithCache], passing a cache sized to the number of distinct hosts served
+// (NewInMemory in the cache subpackage is the ready-made implementation), and
+// set [WithCacheMaxAge] well below the leaf validity. For dynamic per-host
+// issuance, consider [WithCAKeyType] with [KeyTypeECDSAP256]: ECDSA-P256 leaf
+// generation is markedly faster than RSA-2048.
+//
 // # Key algorithms
 //
 // RSA-2048, ECDSA (NIST P-256), and Ed25519 are supported through the
@@ -38,15 +48,15 @@
 // Generate a CA, wrap it in an authority, and serve TLS with SNI-driven
 // certificates:
 //
-//	caCert, caKey, err := tls.GenerateCACertificatePrivateKey(
-//		tls.WithCACommonName("Example Root CA"),
-//		tls.WithCAKeyType(tls.KeyTypeECDSAP256),
+//	caCert, caKey, err := tlscerts.GenerateCACertificatePrivateKey(
+//		tlscerts.WithCACommonName("Example Root CA"),
+//		tlscerts.WithCAKeyType(tlscerts.KeyTypeECDSAP256),
 //	)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
 //
-//	authority, err := tls.New(caCert, caKey)
+//	authority, err := tlscerts.New(caCert, caKey)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -70,4 +80,4 @@
 // the HTTP/2 and HTTP/1.1 ALPN protocols (overridable with
 // [WithNextProtos]). A [CertificateAuthority] is safe for concurrent
 // use by multiple goroutines.
-package tls
+package tlscerts

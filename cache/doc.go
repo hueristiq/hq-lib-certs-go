@@ -1,5 +1,5 @@
 // Package cache defines the certificate storage port used by the
-// CertificateAuthority of the tls package, and provides ready-made
+// CertificateAuthority of the tlscerts package, and provides ready-made
 // implementations of it.
 //
 // A CertificateAuthority has no cache by default: it regenerates a

@@ -1,4 +1,4 @@
-package tls
+package tlscerts
 
 import (
 	"crypto"
@@ -66,7 +66,7 @@ func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 func TestSaveCertificatePrivateKeyToFilesSeparateDirectories(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	certificateFilePath := filepath.Join(t.TempDir(), "certs", "ca.crt")
 	privateKeyFilePath := filepath.Join(t.TempDir(), "keys", "ca.key")
@@ -87,9 +87,9 @@ func TestSaveCertificatePrivateKeyToFilesSeparateDirectories(t *testing.T) {
 func TestSaveCertificatePrivateKeyToFilesValidation(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
-	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	dir := t.TempDir()
 	certificateFilePath := filepath.Join(dir, "ca.crt")
@@ -125,8 +125,8 @@ func TestSaveCertificatePrivateKeyToFilesValidation(t *testing.T) {
 func TestSaveCertificatePrivateKeyToFilesMismatchedKeyWritesNothing(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, _ := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
-	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, _ := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	dir := t.TempDir()
 	certificateFilePath := filepath.Join(dir, "ca.crt")
@@ -144,7 +144,7 @@ func TestSaveCertificatePrivateKeyToFilesMismatchedKeyWritesNothing(t *testing.T
 func TestSaveCertificatePrivateKeyToFilesTightensPermissions(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	privateKeyFilePath := filepath.Join(t.TempDir(), "ca.key")
 
@@ -160,7 +160,7 @@ func TestSaveCertificatePrivateKeyToFilesTightensPermissions(t *testing.T) {
 func TestLoadCertificatePrivateKeyFromFilesValidation(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	certificatePEM, err := CertificateToPEM(caCertificate)
 	require.NoError(t, err)
@@ -367,7 +367,7 @@ func TestSaveCertificatePrivateKeyToFilesPEMConversionErrors(t *testing.T) {
 func TestSaveCertificatePrivateKeyToFilesFilesystemErrors(t *testing.T) {
 	t.Parallel()
 
-	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeED25519))
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	tests := []struct {
 		name        string
