@@ -1,7 +1,10 @@
-package certs
+package tls
 
 import (
-	"crypto/rsa"
+	"crypto"
+	"crypto/x509"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,9 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// expectedWritePerm returns the permission bits a file written by writeToFile is
-// expected to have. Windows only models the read-only attribute, so a writable
-// file stats as 0666 there instead of the 0600 requested at creation.
 func expectedWritePerm() os.FileMode {
 	if runtime.GOOS == "windows" {
 		return 0o666
@@ -22,143 +22,443 @@ func expectedWritePerm() os.FileMode {
 	return 0o600
 }
 
+func expectedKeyPerm() os.FileMode {
+	if runtime.GOOS == "windows" {
+		return 0o444
+	}
+
+	return 0o400
+}
+
+type publicKeySigner struct {
+	publicKey crypto.PublicKey
+}
+
+func (s publicKeySigner) Public() crypto.PublicKey {
+	return s.publicKey
+}
+
+func (publicKeySigner) Sign(_ io.Reader, _ []byte, _ crypto.SignerOpts) ([]byte, error) {
+	return nil, errors.New("publicKeySigner does not sign")
+}
+
 func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	cert, key, err := GenerateCACertificatePrivateKey()
-	require.NoError(t, err)
+	for _, kt := range testKeyTypes {
+		t.Run(kt.name, func(t *testing.T) {
+			t.Parallel()
 
-	dir := t.TempDir()
-	// Nested path exercises directory creation.
-	certPath := filepath.Join(dir, "pki", "cert.pem")
-	keyPath := filepath.Join(dir, "pki", "key.pem")
+			caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(kt.keyType))
 
-	err = SaveCertificatePrivateKeyToFiles(cert, certPath, key, keyPath)
-	require.NoError(t, err)
+			certificateFilePath := filepath.Join(t.TempDir(), "nested", "certs", "ca.crt")
+			privateKeyFilePath := filepath.Join(t.TempDir(), "nested", "keys", "ca.key")
 
-	certInfo, err := os.Stat(certPath)
-	require.NoError(t, err)
-	assert.Equal(t, expectedWritePerm(), certInfo.Mode().Perm())
+			require.NoError(t, SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, certificateFilePath, privateKeyFilePath))
 
-	keyInfo, err := os.Stat(keyPath)
-	require.NoError(t, err)
-	assert.Equal(t, expectedWritePerm(), keyInfo.Mode().Perm())
+			info, err := os.Stat(certificateFilePath)
+			require.NoError(t, err)
+			assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
 
-	loadedCert, loadedKey, err := LoadCertificatePrivateKeyFromFiles(certPath, keyPath)
-	require.NoError(t, err)
+			info, err = os.Stat(privateKeyFilePath)
+			require.NoError(t, err)
+			assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
 
-	assert.Equal(t, cert.Raw, loadedCert.Raw)
-	assert.IsType(t, &rsa.PrivateKey{}, loadedKey)
+			loadedCertificate, loadedPrivateKey, err := LoadCertificatePrivateKeyFromFiles(certificateFilePath, privateKeyFilePath)
+			require.NoError(t, err)
+
+			assert.Equal(t, caCertificate.Raw, loadedCertificate.Raw)
+			assert.IsType(t, caPrivateKey, loadedPrivateKey)
+		})
+	}
 }
 
 func TestSaveCertificatePrivateKeyToFilesSeparateDirectories(t *testing.T) {
 	t.Parallel()
 
-	cert, key, err := GenerateCACertificatePrivateKey()
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+
+	certificateFilePath := filepath.Join(t.TempDir(), "certs", "ca.crt")
+	privateKeyFilePath := filepath.Join(t.TempDir(), "keys", "ca.key")
+
+	require.NoError(t, SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, certificateFilePath, privateKeyFilePath))
+
+	for _, path := range []string{certificateFilePath, privateKeyFilePath} {
+		_, err := os.Stat(path)
+		require.NoError(t, err)
+	}
+
+	loadedCertificate, _, err := LoadCertificatePrivateKeyFromFiles(certificateFilePath, privateKeyFilePath)
 	require.NoError(t, err)
 
-	dir := t.TempDir()
-	// Distinct nested paths exercise directory creation for both files.
-	certPath := filepath.Join(dir, "certs", "cert.pem")
-	keyPath := filepath.Join(dir, "keys", "key.pem")
-
-	err = SaveCertificatePrivateKeyToFiles(cert, certPath, key, keyPath)
-	require.NoError(t, err)
-
-	_, err = os.Stat(certPath)
-	require.NoError(t, err)
-
-	keyInfo, err := os.Stat(keyPath)
-	require.NoError(t, err)
-	assert.Equal(t, expectedWritePerm(), keyInfo.Mode().Perm())
-
-	loadedCert, _, err := LoadCertificatePrivateKeyFromFiles(certPath, keyPath)
-	require.NoError(t, err)
-	assert.Equal(t, cert.Raw, loadedCert.Raw)
+	assert.Equal(t, caCertificate.Raw, loadedCertificate.Raw)
 }
 
 func TestSaveCertificatePrivateKeyToFilesValidation(t *testing.T) {
 	t.Parallel()
 
-	cert, key, err := GenerateCACertificatePrivateKey()
-	require.NoError(t, err)
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+
+	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
 	dir := t.TempDir()
-	certPath := filepath.Join(dir, "cert.pem")
-	keyPath := filepath.Join(dir, "key.pem")
+	certificateFilePath := filepath.Join(dir, "ca.crt")
+	privateKeyFilePath := filepath.Join(dir, "ca.key")
 
-	err = SaveCertificatePrivateKeyToFiles(nil, certPath, key, keyPath)
-	require.ErrorContains(t, err, "certificate is nil")
+	tests := []struct {
+		name                string
+		certificate         *x509.Certificate
+		privateKey          crypto.Signer
+		certificateFilePath string
+		privateKeyFilePath  string
+		errContains         string
+	}{
+		{"nil certificate", nil, caPrivateKey, certificateFilePath, privateKeyFilePath, "certificate is nil"},
+		{"nil private key", caCertificate, nil, certificateFilePath, privateKeyFilePath, "private key is nil"},
+		{"empty certificate file path", caCertificate, caPrivateKey, "", privateKeyFilePath, "certificate file path or private key file path is empty"},
+		{"empty private key file path", caCertificate, caPrivateKey, certificateFilePath, "", "certificate file path or private key file path is empty"},
+		{"mismatched private key", caCertificate, otherPrivateKey, certificateFilePath, privateKeyFilePath, "does not match the certificate's public key"},
+		{"certificate public key cannot be marshaled", &x509.Certificate{PublicKey: "unsupported"}, caPrivateKey, certificateFilePath, privateKeyFilePath, "certificate public key"},
+		{"private key public key cannot be marshaled", caCertificate, fakeSigner{}, certificateFilePath, privateKeyFilePath, "private key's public key"},
+	}
 
-	err = SaveCertificatePrivateKeyToFiles(cert, certPath, nil, keyPath)
-	require.ErrorContains(t, err, "private key is nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	err = SaveCertificatePrivateKeyToFiles(cert, "", key, keyPath)
-	require.ErrorContains(t, err, "file path")
+			err := SaveCertificatePrivateKeyToFiles(tt.certificate, tt.privateKey, tt.certificateFilePath, tt.privateKeyFilePath)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
+}
+
+func TestSaveCertificatePrivateKeyToFilesMismatchedKeyWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, _ := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+	_, otherPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+
+	dir := t.TempDir()
+	certificateFilePath := filepath.Join(dir, "ca.crt")
+	privateKeyFilePath := filepath.Join(dir, "ca.key")
+
+	err := SaveCertificatePrivateKeyToFiles(caCertificate, otherPrivateKey, certificateFilePath, privateKeyFilePath)
+	require.ErrorContains(t, err, "does not match the certificate's public key")
+
+	for _, path := range []string{certificateFilePath, privateKeyFilePath} {
+		_, statErr := os.Stat(path)
+		assert.ErrorIs(t, statErr, os.ErrNotExist)
+	}
+}
+
+func TestSaveCertificatePrivateKeyToFilesTightensPermissions(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+
+	privateKeyFilePath := filepath.Join(t.TempDir(), "ca.key")
+
+	require.NoError(t, os.WriteFile(privateKeyFilePath, []byte("stale"), 0o644)) //nolint:gosec // G306: deliberately loose permissions to verify the save tightens them
+
+	require.NoError(t, SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, filepath.Join(t.TempDir(), "ca.crt"), privateKeyFilePath))
+
+	info, err := os.Stat(privateKeyFilePath)
+	require.NoError(t, err)
+	assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
 }
 
 func TestLoadCertificatePrivateKeyFromFilesValidation(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := LoadCertificatePrivateKeyFromFiles("", "")
-	require.ErrorContains(t, err, "file path")
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
 
-	dir := t.TempDir()
+	certificatePEM, err := CertificateToPEM(caCertificate)
+	require.NoError(t, err)
 
-	_, _, err = LoadCertificatePrivateKeyFromFiles(
-		filepath.Join(dir, "missing-cert.pem"),
-		filepath.Join(dir, "missing-key.pem"),
-	)
-	require.Error(t, err)
+	privateKeyPEM, err := PrivateKeyToPEM(caPrivateKey)
+	require.NoError(t, err)
+
+	writeFile := func(t *testing.T, path string, content []byte) {
+		t.Helper()
+
+		require.NoError(t, os.WriteFile(path, content, 0o600))
+	}
+
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, dir string) (certificateFilePath, privateKeyFilePath string)
+		errContains string
+	}{
+		{
+			name: "empty file paths",
+			setup: func(t *testing.T, _ string) (string, string) {
+				t.Helper()
+
+				return "", ""
+			},
+			errContains: "certificate file path or private key file path is empty",
+		},
+		{
+			name: "missing files",
+			setup: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				return filepath.Join(dir, "missing.crt"), filepath.Join(dir, "missing.key")
+			},
+			errContains: "loading certificate and private key from files",
+		},
+		{
+			name: "certificate file is not PEM",
+			setup: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				certificateFilePath := filepath.Join(dir, "ca.crt")
+				privateKeyFilePath := filepath.Join(dir, "ca.key")
+
+				writeFile(t, certificateFilePath, []byte("not pem"))
+				writeFile(t, privateKeyFilePath, privateKeyPEM)
+
+				return certificateFilePath, privateKeyFilePath
+			},
+			errContains: "loading certificate and private key from files",
+		},
+		{
+			name: "private key file has wrong block type",
+			setup: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				certificateFilePath := filepath.Join(dir, "ca.crt")
+				privateKeyFilePath := filepath.Join(dir, "ca.key")
+
+				writeFile(t, certificateFilePath, certificatePEM)
+				writeFile(t, privateKeyFilePath, certificatePEM)
+
+				return certificateFilePath, privateKeyFilePath
+			},
+			errContains: "loading certificate and private key from files",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			certificateFilePath, privateKeyFilePath := tt.setup(t, t.TempDir())
+
+			_, _, err := LoadCertificatePrivateKeyFromFiles(certificateFilePath, privateKeyFilePath)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
 }
 
 func TestMkdir(t *testing.T) {
 	t.Parallel()
 
-	err := mkdir("")
-	require.ErrorContains(t, err, "directory path is empty")
+	t.Run("empty path", func(t *testing.T) {
+		t.Parallel()
 
-	dir := t.TempDir()
-	nested := filepath.Join(dir, "a", "b", "c")
+		err := mkdir("")
+		require.ErrorContains(t, err, "directory path is empty")
+	})
 
-	err = mkdir(nested)
-	require.NoError(t, err)
+	t.Run("nested creation", func(t *testing.T) {
+		t.Parallel()
 
-	info, err := os.Stat(nested)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
+		path := filepath.Join(t.TempDir(), "a", "b", "c")
 
-	// Calling again on an existing directory is a no-op.
-	err = mkdir(nested)
-	require.NoError(t, err)
+		require.NoError(t, mkdir(path))
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "nested", "dir")
+
+		require.NoError(t, mkdir(path))
+		require.NoError(t, mkdir(path))
+	})
+
+	t.Run("path exists as file", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "file")
+
+		require.NoError(t, os.WriteFile(path, []byte("content"), 0o600))
+
+		err := mkdir(path)
+		require.ErrorContains(t, err, "creating directory")
+	})
 }
 
 func TestWriteToFile(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "data.bin")
+	t.Run("content round trip", func(t *testing.T) {
+		t.Parallel()
 
-	err := writeToFile([]byte("hello"), path)
-	require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), "file.txt")
+		content := []byte("hello, certs")
 
-	content, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("hello"), content)
+		require.NoError(t, writeToFile(content, path, 0o600))
 
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
+		read, err := os.ReadFile(path) //nolint:gosec // G304: test-controlled path under t.TempDir()
+		require.NoError(t, err)
+		assert.Equal(t, content, read)
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
+	})
+
+	t.Run("tightens permissions of existing file", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "file.txt")
+
+		require.NoError(t, os.WriteFile(path, []byte("stale"), 0o644)) //nolint:gosec // G306: deliberately loose permissions to verify they are tightened
+
+		require.NoError(t, writeToFile([]byte("hello, certs"), path, 0o600))
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
+	})
+
+	t.Run("read-only target permissions survive a rewrite", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "file.txt")
+
+		require.NoError(t, writeToFile([]byte("first"), path, 0o400))
+		require.NoError(t, writeToFile([]byte("second"), path, 0o400))
+
+		read, err := os.ReadFile(path) //nolint:gosec // G304: test-controlled path under t.TempDir()
+		require.NoError(t, err)
+		assert.Equal(t, []byte("second"), read)
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
+	})
+
+	t.Run("empty path", func(t *testing.T) {
+		t.Parallel()
+
+		err := writeToFile([]byte("content"), "", 0o600)
+		require.ErrorContains(t, err, "file path is empty")
+	})
+
+	t.Run("empty content", func(t *testing.T) {
+		t.Parallel()
+
+		err := writeToFile(nil, filepath.Join(t.TempDir(), "file.txt"), 0o600)
+		require.ErrorContains(t, err, "content to write")
+	})
+
+	t.Run("missing parent directory", func(t *testing.T) {
+		t.Parallel()
+
+		err := writeToFile([]byte("content"), filepath.Join(t.TempDir(), "missing", "file.txt"), 0o600)
+		require.ErrorContains(t, err, "writing content to file")
+	})
 }
 
-func TestWriteToFileValidation(t *testing.T) {
+func TestSaveCertificatePrivateKeyToFilesPEMConversionErrors(t *testing.T) {
 	t.Parallel()
 
-	err := writeToFile([]byte("data"), "")
-	require.ErrorContains(t, err, "file path is empty")
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeRSA2048))
 
-	dir := t.TempDir()
+	t.Run("certificate has no raw data", func(t *testing.T) {
+		t.Parallel()
 
-	err = writeToFile(nil, filepath.Join(dir, "empty.bin"))
-	require.ErrorContains(t, err, "content")
+		certificate := &x509.Certificate{PublicKey: caCertificate.PublicKey}
+
+		err := SaveCertificatePrivateKeyToFiles(certificate, caPrivateKey, filepath.Join(t.TempDir(), "ca.crt"), filepath.Join(t.TempDir(), "ca.key"))
+		require.ErrorContains(t, err, "converting certificate to PEM format")
+	})
+
+	t.Run("private key type unsupported for PEM encoding", func(t *testing.T) {
+		t.Parallel()
+
+		privateKey := publicKeySigner{publicKey: caCertificate.PublicKey}
+
+		err := SaveCertificatePrivateKeyToFiles(caCertificate, privateKey, filepath.Join(t.TempDir(), "ca.crt"), filepath.Join(t.TempDir(), "ca.key"))
+		require.ErrorContains(t, err, "converting private key to PEM format")
+	})
+}
+
+func TestSaveCertificatePrivateKeyToFilesFilesystemErrors(t *testing.T) {
+	t.Parallel()
+
+	caCertificate, caPrivateKey := newTestCACertificatePrivateKey(t, WithCAKeyType(KeyTypeEd25519))
+
+	tests := []struct {
+		name        string
+		paths       func(t *testing.T, dir string) (certificateFilePath, privateKeyFilePath string)
+		errContains string
+	}{
+		{
+			name: "certificate directory cannot be created",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				blocker := filepath.Join(dir, "blocker")
+				require.NoError(t, os.WriteFile(blocker, []byte("file"), 0o600))
+
+				return filepath.Join(blocker, "ca.crt"), filepath.Join(dir, "ca.key")
+			},
+			errContains: "for certificate",
+		},
+		{
+			name: "private key directory cannot be created",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				blocker := filepath.Join(dir, "blocker")
+				require.NoError(t, os.WriteFile(blocker, []byte("file"), 0o600))
+
+				return filepath.Join(dir, "ca.crt"), filepath.Join(blocker, "ca.key")
+			},
+			errContains: "for private key",
+		},
+		{
+			name: "certificate file path is a directory",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				certificateFilePath := filepath.Join(dir, "certs")
+				require.NoError(t, os.MkdirAll(certificateFilePath, 0o750))
+
+				return certificateFilePath, filepath.Join(dir, "ca.key")
+			},
+			errContains: "writing certificate to file",
+		},
+		{
+			name: "private key file path is a directory",
+			paths: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+
+				privateKeyFilePath := filepath.Join(dir, "keys")
+				require.NoError(t, os.MkdirAll(privateKeyFilePath, 0o750))
+
+				return filepath.Join(dir, "ca.crt"), privateKeyFilePath
+			},
+			errContains: "writing private key to file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			certificateFilePath, privateKeyFilePath := tt.paths(t, t.TempDir())
+
+			err := SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, certificateFilePath, privateKeyFilePath)
+			require.ErrorContains(t, err, tt.errContains)
+		})
+	}
 }

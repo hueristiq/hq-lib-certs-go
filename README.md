@@ -1,10 +1,10 @@
-# hq-lib-certs-go
+# hq-lib-tls-go
 
-![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-certs-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-certs-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/blob/master/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-certs-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-certs-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-certs-go/blob/master/CONTRIBUTING.md)
+![made with go](https://img.shields.io/badge/made%20with-Go-1E90FF.svg) [![go reference](https://pkg.go.dev/badge/github.com/hueristiq/hq-lib-tls-go.svg)](https://pkg.go.dev/github.com/hueristiq/hq-lib-tls-go) [![license](https://img.shields.io/badge/license-MIT-gray.svg?color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/blob/main/LICENSE) ![maintenance](https://img.shields.io/badge/maintained%3F-yes-1E90FF.svg) [![open issues](https://img.shields.io/github/issues-raw/hueristiq/hq-lib-tls-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/issues?q=is:issue+is:open) [![closed issues](https://img.shields.io/github/issues-closed-raw/hueristiq/hq-lib-tls-go.svg?style=flat&color=1E90FF)](https://github.com/hueristiq/hq-lib-tls-go/issues?q=is:issue+is:closed) [![contribution](https://img.shields.io/badge/contributions-welcome-1E90FF.svg)](https://github.com/hueristiq/hq-lib-tls-go/blob/main/CONTRIBUTING.md)
 
-`hq-lib-certs-go` is a [Go (Golang)](http://golang.org/) package for generating, managing, and signing X.509 certificates.
+`hq-lib-tls-go` is a [Go](https://golang.org/) package for generating, managing, and signing X.509 certificates.
 
-## Resource
+## Resources
 
 - [Features](#features)
 - [Installation](#installation)
@@ -14,28 +14,35 @@
 	- [Loading a Certificate from Files](#loading-a-certificate-from-files)
 	- [Loading a CA from PEM Bytes](#loading-a-ca-from-pem-bytes)
 	- [Generating a TLS Certificate](#generating-a-tls-certificate)
+	- [Signing a Certificate Signing Request (CSR)](#signing-a-certificate-signing-request-csr)
 	- [Configuring a TLS Server with SNI](#configuring-a-tls-server-with-sni)
+	- [Restricting Issuance to Known Hosts](#restricting-issuance-to-known-hosts)
 - [Contributing](#contributing)
 - [Licensing](#licensing)
 
 ## Features
 
-- **Self-Signed CA Generation:** Create CA certificates with customizable subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
-- **TLS Certificate Issuance:** Issue signed leaf certificates for DNS names, IP addresses, email addresses, and URIs, with configurable subject, validity, and extended key usage (server or client/mTLS). Leaf keys match the CA's algorithm.
-- **Dynamic TLS Configuration:** SNI-based certificate generation for TLS servers, with a minimum TLS version of 1.2 and ALPN protocols advertised for HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
-- **Certificate Caching:** In-memory caching of dynamically generated certificates, with cache size and expiry configurable through options on `New`.
-- **PEM and File Helpers:** Encode certificates and keys to PEM, save and load them from disk, and construct an authority directly from PEM bytes.
-- **Standards Compliance:** Follows RFC 5280 for certificate generation and RFC 7468 for PEM encoding.
+- **Self-Signed CA Generation:** Create CA certificates with custom subject, validity, and key algorithm (RSA-2048, ECDSA P-256, or Ed25519).
+- **TLS Certificate Issuance:** Issue leaf certificates for DNS names, IPs, emails, or URIs, with keys inheriting the CA's algorithm.
+- **Dynamic TLS Configuration:** SNI-driven per-host certificate generation, TLS 1.2 minimum, HTTP/2 and HTTP/1.1 ALPN.
+- **Opt-In Certificate Caching:** Pluggable caching via the `cache` package; without it, certificates are regenerated per request.
+- **SNI Allowlist:** Restrict dynamic issuance to known hostnames with `WithAllowedHosts`, bounding CPU use on Internet-facing servers.
 
 ## Installation
 
-To install `hq-lib-certs-go`, run the following command in your Go project:
+To install `hq-lib-tls-go`, run the following command in your Go project:
 
 ```bash
-go get -v -u github.com/hueristiq/hq-lib-certs-go
+go get -v -u github.com/hueristiq/hq-lib-tls-go
 ```
 
 ## Usage
+
+The examples below import the package under the `hqgotls` alias (and subpackage under `hqgotlscache`).
+
+```go
+import hqgotls "github.com/hueristiq/hq-lib-tls-go"
+```
 
 ### Generating a CA Certificate
 
@@ -48,22 +55,22 @@ import (
 	"log"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Generate a CA certificate with custom options.
-	caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-		certs.CACertificatePrivateKeyWithCommonName("My Root CA"),
-		certs.CACertificatePrivateKeyWithOrganization([]string{"My Company"}),
-		certs.CACertificatePrivateKeyWithValidFor(365*24*time.Hour),
+	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+		hqgotls.WithCACommonName("My Root CA"),
+		hqgotls.WithCAOrganization([]string{"My Company"}),
+		hqgotls.WithCAValidFor(365*24*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
 	// Save to PEM files.
-	if err = certs.SaveCertificatePrivateKeyToFiles(caCert, "ca-cert.pem", caKey, "ca-key.pem"); err != nil {
+	if err = hqgotls.SaveCertificatePrivateKeyToFiles(caCert, caKey, "ca-cert.pem", "ca-key.pem"); err != nil {
 		log.Fatalf("Failed to save CA certificate: %v", err)
 	}
 
@@ -73,16 +80,16 @@ func main() {
 
 ### Choosing the Key Algorithm
 
-Pass `CACertificatePrivateKeyWithKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
+Pass `WithCAKeyType` to control the CA's private key algorithm. Because every leaf certificate inherits the CA's algorithm, an ECDSA or Ed25519 CA also makes per-host issuance faster — useful for the SNI server below, which generates a key per hostname.
 
 ```go
-caCert, caKey, err := certs.GenerateCACertificatePrivateKey(
-	certs.CACertificatePrivateKeyWithCommonName("My Root CA"),
-	certs.CACertificatePrivateKeyWithKeyType(certs.KeyTypeECDSAP256),
+caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+	hqgotls.WithCACommonName("My Root CA"),
+	hqgotls.WithCAKeyType(hqgotls.KeyTypeECDSAP256),
 )
 ```
 
-Available key types: `KeyTypeRSA2048` (default), `KeyTypeECDSAP256`, and `KeyTypeED25519`.
+Available key types: `KeyTypeRSA2048` (default), `KeyTypeECDSAP256`, and `KeyTypeEd25519`.
 
 ### Loading a Certificate from Files
 
@@ -94,25 +101,25 @@ package main
 import (
 	"log"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
-	caCert, caKey, err := certs.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
-	log.Println("Successfully loaded CA certificate and key")
+	log.Printf("Loaded CA certificate %q with key type %T\n", caCert.Subject.CommonName, caKey)
 }
 ```
 
 ### Loading a CA from PEM Bytes
 
-When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewWithBytesCertificatePrivateKey`.
+When the certificate and key are already in memory (for example, read from a secret store), construct the authority directly with `NewFromPEM`.
 
 ```go
-ca, err := certs.NewWithBytesCertificatePrivateKey(caCertPEM, caKeyPEM)
+ca, err := hqgotls.NewFromPEM(caCertPEM, caKeyPEM)
 if err != nil {
 	log.Fatalf("Failed to initialize CA: %v", err)
 }
@@ -129,18 +136,18 @@ import (
 	"log"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
 )
 
 func main() {
 	// Load CA certificate and private key.
-	caCert, caKey, err := certs.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
 	if err != nil {
 		log.Fatalf("Failed to load CA certificate: %v", err)
 	}
 
 	// Initialize the CertificateAuthority.
-	ca, err := certs.New(caCert, caKey)
+	ca, err := hqgotls.New(caCert, caKey)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
 	}
@@ -148,16 +155,16 @@ func main() {
 	// Generate a TLS certificate for multiple hosts.
 	tlsCert, tlsKey, err := ca.GenerateTLSCertificate(
 		[]string{"example.com", "www.example.com", "192.168.1.1", "user@example.com"},
-		certs.TLSCertificatePrivateKeyWithCommonName("example.com"),
-		certs.TLSCertificatePrivateKeyWithOrganization([]string{"My Company"}),
-		certs.TLSCertificatePrivateKeyWithValidFor(30*24*time.Hour), // 30 days
+		hqgotls.WithTLSCommonName("example.com"),
+		hqgotls.WithTLSOrganization([]string{"My Company"}),
+		hqgotls.WithTLSValidFor(30*24*time.Hour), // 30 days
 	)
 	if err != nil {
 		log.Fatalf("Failed to generate TLS certificate: %v", err)
 	}
 
 	// Save the TLS certificate and key.
-	if err := certs.SaveCertificatePrivateKeyToFiles(tlsCert, "tls-cert.pem", tlsKey, "tls-key.pem"); err != nil {
+	if err := hqgotls.SaveCertificatePrivateKeyToFiles(tlsCert, tlsKey, "tls-cert.pem", "tls-key.pem"); err != nil {
 		log.Fatalf("Failed to save TLS certificate: %v", err)
 	}
 
@@ -165,18 +172,82 @@ func main() {
 }
 ```
 
-Certificates default to server authentication. To issue a client certificate for mutual TLS, set the extended key usage:
+By default the extended key usage is derived from the SAN kinds present: server authentication when the certificate names a host (DNS name, IP address, or URI) and email protection when it names an email address. To issue a client certificate for mutual TLS, set the extended key usage explicitly:
 
 ```go
 clientCert, clientKey, err := ca.GenerateTLSCertificate(
 	[]string{"client.example.com"},
-	certs.TLSCertificatePrivateKeyWithExtKeyUsage(x509.ExtKeyUsageClientAuth),
+	hqgotls.WithTLSExtKeyUsage(x509.ExtKeyUsageClientAuth),
 )
+```
+
+### Signing a Certificate Signing Request (CSR)
+
+`SignCSR` signs a CSR with the CA's private key: the client keeps its private key, and the CA never sees it. The CSR's signature is verified before signing, its subject alternative names are copied to the certificate, and the default extended key usage is client authentication — suited to issuing client certificates for mutual TLS. The same `TLSOption`s as `GenerateTLSCertificate` override the defaults.
+
+```go
+package main
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"log"
+
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+)
+
+func main() {
+	// Load CA certificate and private key.
+	caCert, caKey, err := hqgotls.LoadCertificatePrivateKeyFromFiles("ca-cert.pem", "ca-key.pem")
+	if err != nil {
+		log.Fatalf("Failed to load CA certificate: %v", err)
+	}
+
+	// Initialize the CertificateAuthority.
+	ca, err := hqgotls.New(caCert, caKey)
+	if err != nil {
+		log.Fatalf("Failed to initialize CA: %v", err)
+	}
+
+	// Client side: build a CSR (in practice it arrives from the client).
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("Failed to generate client key: %v", err)
+	}
+
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "client.example.com"},
+		DNSNames: []string{"client.example.com"},
+	}, clientKey)
+	if err != nil {
+		log.Fatalf("Failed to create CSR: %v", err)
+	}
+
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		log.Fatalf("Failed to parse CSR: %v", err)
+	}
+
+	// CA side: sign the CSR.
+	clientCert, err := ca.SignCSR(csr)
+	if err != nil {
+		log.Fatalf("Failed to sign CSR: %v", err)
+	}
+
+	log.Printf("Issued client certificate %q, valid until %v\n", clientCert.Subject.CommonName, clientCert.NotAfter)
+}
 ```
 
 ### Configuring a TLS Server with SNI
 
-`NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI, caching results to avoid re-issuing on every connection. Tune the cache through options on `New`.
+`NewTLSConfig` returns a `*tls.Config` that generates a certificate for whatever hostname the client requests via SNI. Caching is opt-in: pass a cache from the `cache` package to `New` via `WithCache` to reuse certificates across connections, and tune entry expiry with `WithCacheMaxAge`. Without a cache, a certificate is regenerated for every request.
+
+**Production use:** the cache is off by default — enable it with `WithCache(hqgotlscache.NewInMemory(maxSize))`, sized to the number of distinct hosts served, and set `WithCacheMaxAge` well below the leaf validity (24 hours for SNI-driven issuance). For dynamic per-host issuance, consider `WithCAKeyType(KeyTypeECDSAP256)`: ECDSA-P256 leaf generation is markedly faster than RSA-2048.
+
+Note that the `GetCertificate` hook mints a new key pair for every distinct requested hostname, so an Internet-facing server should restrict issuance — see [Restricting Issuance to Known Hosts](#restricting-issuance-to-known-hosts) — to avoid CPU exhaustion from unbounded certificate generation.
 
 ```go
 package main
@@ -186,20 +257,28 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hueristiq/hq-lib-certs-go"
+	hqgotls "github.com/hueristiq/hq-lib-tls-go"
+	hqgotlscache "github.com/hueristiq/hq-lib-tls-go/cache"
 )
 
 func main() {
 	// Generate or load the CA certificate and key.
-	caCert, caKey, err := certs.GenerateCACertificatePrivateKey()
+	caCert, caKey, err := hqgotls.GenerateCACertificatePrivateKey(
+		hqgotls.WithCACommonName("My Root CA"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate: %v", err)
 	}
 
-	// Initialize the CertificateAuthority, tuning the certificate cache.
-	ca, err := certs.New(caCert, caKey,
-		certs.CertificateAuthorityWithCacheMaxSize(1024),
-		certs.CertificateAuthorityWithCacheMaxAge(6*time.Hour),
+	// Initialize the certificate cache and the CertificateAuthority.
+	certificateCache, err := hqgotlscache.NewInMemory(1024)
+	if err != nil {
+		log.Fatalf("Failed to initialize certificate cache: %v", err)
+	}
+
+	ca, err := hqgotls.New(caCert, caKey,
+		hqgotls.WithCache(certificateCache),
+		hqgotls.WithCacheMaxAge(6*time.Hour),
 	)
 	if err != nil {
 		log.Fatalf("Failed to initialize CA: %v", err)
@@ -217,6 +296,7 @@ func main() {
 	}
 
 	log.Println("Starting TLS server on :443")
+
 	if err := server.ListenAndServeTLS("", ""); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
@@ -225,14 +305,26 @@ func main() {
 
 Because the certificates are signed by a self-signed CA, clients must trust `caCert` (for example, by adding it to their root pool) for the handshake to succeed. If a client connects without SNI, use `NewTLSConfigWithHost` to supply a default hostname.
 
+The returned configuration requires TLS 1.2 or higher and advertises the `h2` and `http/1.1` ALPN protocols by default; pass `WithNextProtos` to change them, or call it with no arguments to disable ALPN for non-HTTP servers. To get the same bundled certificate (leaf plus CA chain, with the `Leaf` field populated) outside of a server, call `ca.TLSCertificate("example.com")`.
+
+### Restricting Issuance to Known Hosts
+
+The `GetCertificate` hook mints a new key pair for every distinct requested hostname. On an Internet-facing server, restrict issuance to the hostnames you actually serve with `WithAllowedHosts`; a handshake for any other name fails before any key generation happens:
+
+```go
+tlsConfig := ca.NewTLSConfig(hqgotls.WithAllowedHosts("example.com", "app.example.com"))
+```
+
+Names are normalized exactly like requested SNI names (port stripped, case folded, trailing dot removed), so "Example.COM." and "example.com" are the same entry. A client that sends no SNI falls through to the wrapped configuration: `NewTLSConfig` errors, `NewTLSConfigWithHost` substitutes its default hostname. Calling `WithAllowedHosts` with no hosts rejects every SNI name.
+
 ## Contributing
 
-Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-certs-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-certs-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-certs-go/blob/master/CONTRIBUTING.md).
+Contributions are welcome and encouraged! Feel free to submit [Pull Requests](https://github.com/hueristiq/hq-lib-tls-go/pulls) or report [Issues](https://github.com/hueristiq/hq-lib-tls-go/issues). For more details, check out the [contribution guidelines](https://github.com/hueristiq/hq-lib-tls-go/blob/main/CONTRIBUTING.md).
 
-A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-certs-go/graphs/contributors) for your ongoing support!
+A big thank you to all the [contributors](https://github.com/hueristiq/hq-lib-tls-go/graphs/contributors) for your ongoing support!
 
-![contributors](https://contrib.rocks/image?repo=hueristiq/hq-lib-certs-go&max=500)
+![contributors](https://contrib.rocks/image?repo=hueristiq/hq-lib-tls-go&max=500)
 
 ## Licensing
 
-This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-certs-go/blob/master/LICENSE).
+This package is licensed under the [MIT license](https://opensource.org/license/mit). You are free to use, modify, and distribute it, as long as you follow the terms of the license. You can find the full license text in the repository - [Full MIT license text](https://github.com/hueristiq/hq-lib-tls-go/blob/main/LICENSE).
