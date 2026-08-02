@@ -1,4 +1,4 @@
-package tlscerts
+package tls
 
 import (
 	"crypto"
@@ -20,6 +20,14 @@ func expectedWritePerm() os.FileMode {
 	}
 
 	return 0o600
+}
+
+func expectedKeyPerm() os.FileMode {
+	if runtime.GOOS == "windows" {
+		return 0o444
+	}
+
+	return 0o400
 }
 
 type publicKeySigner struct {
@@ -48,11 +56,13 @@ func TestSaveAndLoadCertificatePrivateKeyRoundTrip(t *testing.T) {
 
 			require.NoError(t, SaveCertificatePrivateKeyToFiles(caCertificate, caPrivateKey, certificateFilePath, privateKeyFilePath))
 
-			for _, path := range []string{certificateFilePath, privateKeyFilePath} {
-				info, err := os.Stat(path)
-				require.NoError(t, err)
-				assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
-			}
+			info, err := os.Stat(certificateFilePath)
+			require.NoError(t, err)
+			assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
+
+			info, err = os.Stat(privateKeyFilePath)
+			require.NoError(t, err)
+			assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
 
 			loadedCertificate, loadedPrivateKey, err := LoadCertificatePrivateKeyFromFiles(certificateFilePath, privateKeyFilePath)
 			require.NoError(t, err)
@@ -154,7 +164,7 @@ func TestSaveCertificatePrivateKeyToFilesTightensPermissions(t *testing.T) {
 
 	info, err := os.Stat(privateKeyFilePath)
 	require.NoError(t, err)
-	assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
+	assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
 }
 
 func TestLoadCertificatePrivateKeyFromFilesValidation(t *testing.T) {
@@ -293,7 +303,7 @@ func TestWriteToFile(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "file.txt")
 		content := []byte("hello, certs")
 
-		require.NoError(t, writeToFile(content, path))
+		require.NoError(t, writeToFile(content, path, 0o600))
 
 		read, err := os.ReadFile(path) //nolint:gosec // G304: test-controlled path under t.TempDir()
 		require.NoError(t, err)
@@ -311,31 +321,48 @@ func TestWriteToFile(t *testing.T) {
 
 		require.NoError(t, os.WriteFile(path, []byte("stale"), 0o644)) //nolint:gosec // G306: deliberately loose permissions to verify they are tightened
 
-		require.NoError(t, writeToFile([]byte("hello, certs"), path))
+		require.NoError(t, writeToFile([]byte("hello, certs"), path, 0o600))
 
 		info, err := os.Stat(path)
 		require.NoError(t, err)
 		assert.Equal(t, expectedWritePerm(), info.Mode().Perm())
 	})
 
+	t.Run("read-only target permissions survive a rewrite", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "file.txt")
+
+		require.NoError(t, writeToFile([]byte("first"), path, 0o400))
+		require.NoError(t, writeToFile([]byte("second"), path, 0o400))
+
+		read, err := os.ReadFile(path) //nolint:gosec // G304: test-controlled path under t.TempDir()
+		require.NoError(t, err)
+		assert.Equal(t, []byte("second"), read)
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, expectedKeyPerm(), info.Mode().Perm())
+	})
+
 	t.Run("empty path", func(t *testing.T) {
 		t.Parallel()
 
-		err := writeToFile([]byte("content"), "")
+		err := writeToFile([]byte("content"), "", 0o600)
 		require.ErrorContains(t, err, "file path is empty")
 	})
 
 	t.Run("empty content", func(t *testing.T) {
 		t.Parallel()
 
-		err := writeToFile(nil, filepath.Join(t.TempDir(), "file.txt"))
+		err := writeToFile(nil, filepath.Join(t.TempDir(), "file.txt"), 0o600)
 		require.ErrorContains(t, err, "content to write")
 	})
 
 	t.Run("missing parent directory", func(t *testing.T) {
 		t.Parallel()
 
-		err := writeToFile([]byte("content"), filepath.Join(t.TempDir(), "missing", "file.txt"))
+		err := writeToFile([]byte("content"), filepath.Join(t.TempDir(), "missing", "file.txt"), 0o600)
 		require.ErrorContains(t, err, "writing content to file")
 	})
 }
